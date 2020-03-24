@@ -435,8 +435,6 @@ void do_render(GraphicsState* gfx)
         glm::mat4 view = glm::mat4(1.0f);
         glm::mat4 projection = glm::mat4(1.0f);
 
-        glUseProgram(gfx->shader);
-
         projection = glm::perspective(glm::radians(75.0f), (float)gfx->width / (float)gfx->height, 0.1f, 2000.0f);
 
         // flip x axis, from right handed (gl) to left handed (unity)
@@ -469,8 +467,9 @@ void do_render(GraphicsState* gfx)
             player_forward_vec = get_forward_vec(pitch, yaw, cam_at);
             glm::vec3 cam_look = cam_at + player_forward_vec;
             view = glm::lookAt(cam_at, cam_look, { 0.0f, 1.0f, 0.0f });
-            glUniform1f(glGetUniformLocation(gfx->shader, "player_y"), player_y);
 
+            glUseProgram(gfx->shader);
+            glUniform1f(glGetUniformLocation(gfx->shader, "player_y"), player_y);
             glUniformMatrix4fv(glGetUniformLocation(gfx->shader, "projection"), 1, GL_FALSE, &projection[0][0]);
             glUniformMatrix4fv(glGetUniformLocation(gfx->shader, "view"), 1, GL_FALSE, &view[0][0]);
 
@@ -491,6 +490,7 @@ void do_render(GraphicsState* gfx)
                 glm::mat4 model = glm::mat4(1.0f);
                 glm::vec3 pos(x, y, z);
                 model = glm::translate(model, pos) * glm::scale(model, glm::vec3(scale_x, scale_y, scale_z));
+                glUseProgram(gfx->shader);
                 glUniform1i(glGetUniformLocation(gfx->shader, "line"), 0);
                 glUniform1f(glGetUniformLocation(gfx->shader, "obj_y"), y - (scale_y / 2.0f));
                 glUniform3f(glGetUniformLocation(gfx->shader, "color"), r / 255.0f, g / 255.0f, b / 255.0f);
@@ -508,6 +508,7 @@ void do_render(GraphicsState* gfx)
                     to_x, to_y, to_z,
                 };
 
+                glUseProgram(gfx->shader);
                 glUniform1i(glGetUniformLocation(gfx->shader, "line"), a);
                 glUniform3f(glGetUniformLocation(gfx->shader, "color"), r / 255.0f, g / 255.0f, b / 255.0f);
                 glBindBuffer(GL_ARRAY_BUFFER, gfx->line_vbo);
@@ -635,13 +636,6 @@ void do_render(GraphicsState* gfx)
                 glm::vec3 obs_pos(obs->pos.x, obs->pos.y, obs->pos.z);
                 draw_text(obs->pos.x, obs->pos.y + 3.0f, obs->pos.z, 0.25f, std::to_string((int)glm::length(obs_pos - player_pos)).c_str(), r, g, b, get_alpha_for_y(player_y, obs->pos.y), &view, &projection);
                 draw_text(obs->pos.x, obs->pos.y + 2.0f, obs->pos.z, 0.05f, obs->name.c_str(), r, g, b, get_alpha_for_y(player_y, obs->pos.y), &view, &projection);
-
-                for (tk::LootEntry& entry : obs->inventory)
-                {
-                    entry.pos = obs->pos;
-                    entry.pos.y += 0.5f;
-                    draw_loot(&entry, false);
-                }
             }
 
             for (auto& [pos, txt] : loot_text_to_render)
