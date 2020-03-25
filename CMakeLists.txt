@@ -44,16 +44,20 @@ if(MSVC)
     add_definitions(-D_CRT_SECURE_NO_WARNINGS)
 endif()
 
-#if(${CMAKE_BUILD_TYPE} STREQUAL "Debug")
-#	set(EXTRA_LIBS cpr-d libcurl-d zlib-d fmt-d spdlog-d)
-#else()
-#	set(EXTRA_LIBS cpr libcurl zlib fmt spdlog)
-#endif()
+if(${CMAKE_BUILD_TYPE} STREQUAL "Debug")
+	set(EXTRA_LIBS GlU32d OpenGL32d glew32d json11d minizd pthreadVC2 Packet wpcap Common++d Packet++d Pcap++d SDL2d SDL2maind)
+else()
+	set(EXTRA_LIBS GlU32 OpenGL32 glew32 json11 miniz pthreadVC2 Packet wpcap Common++ Packet++ Pcap++ SDL2 SDL2main)
+endif()
 
 include_directories(${PROJECT_SOURCE_DIR}/extern/include)
-link_directories(${PROJECT_SOURCE_DIR}/extern/lib_x64)
+include_directories(${PROJECT_SOURCE_DIR}/extern/include/common++)
+include_directories(${PROJECT_SOURCE_DIR}/extern/include/packet++)
+include_directories(${PROJECT_SOURCE_DIR}/extern/include/pcap++)
+link_directories(${PROJECT_SOURCE_DIR}/extern/lib/x64)
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ../Bin)
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ../Bin)
 
 file(GLOB EftRadar_HEADERS
     "src/*.hpp"
@@ -62,8 +66,17 @@ file(GLOB EftRadar_SOURCES
     "src/*.cpp"
 )
 
-add_library(${PROJECT_NAME} STATIC ${EftRadar_HEADERS} ${EftRadar_SOURCES})
+add_executable(${PROJECT_NAME} ${EftRadar_HEADERS} ${EftRadar_SOURCES})
+
+target_link_libraries(${PROJECT_NAME} ws2_32 crypt32 Iphlpapi ${EXTRA_LIBS})
 
 set_property(TARGET ${PROJECT_NAME} PROPERTY CXX_STANDARD 17)
 set_property(TARGET ${PROJECT_NAME} PROPERTY CXX_STANDARD_REQUIRED ON)
 set_property(TARGET ${PROJECT_NAME} PROPERTY CMAKE_CXX_EXTENSIONS OFF)
+
+add_custom_command(
+    TARGET ${PROJECT_NAME}
+    POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy ${PROJECT_SOURCE_DIR}/extern/bin/x64/pthreadVC2.dll ${PROJECT_SOURCE_DIR}/Bin/pthreadVC2.dll
+    COMMAND ${CMAKE_COMMAND} -E copy ${PROJECT_SOURCE_DIR}/extern/bin/x64/SDL2d.dll ${PROJECT_SOURCE_DIR}/Bin/SDL2.dll
+)

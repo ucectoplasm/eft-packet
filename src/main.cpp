@@ -1,9 +1,9 @@
-#include "IPv4Layer.h"
-#include "IPv6Layer.h"
-#include "Packet.h"
-#include "PcapLiveDevice.h"
-#include "PcapLiveDeviceList.h"
-#include "UdpLayer.h"
+#include "pcap++/IPv4Layer.h"
+#include "pcap++/IPv6Layer.h"
+#include "pcap++/Packet.h"
+#include "pcap++/PcapLiveDevice.h"
+#include "pcap++/PcapLiveDeviceList.h"
+#include "pcap++/UdpLayer.h"
 
 #include "gl/glew.h"
 #include "gl/glu.h"
@@ -11,8 +11,8 @@
 #include "glm/gtc/matrix_transform.hpp"
 #include "glm/gtc/type_ptr.hpp"
 
-#include "SDL.h"
-#include "SDL_opengl.h"
+#include "SDL/SDL.h"
+#include "SDL/SDL_opengl.h"
 #include "unet.hpp"
 #include "common.hpp"
 
@@ -69,7 +69,7 @@ void do_render(GraphicsState* state);
 GraphicsState make_gfx(SDL_GLContext ctx, SDL_Window* window);
 void resize_gfx(GraphicsState* state, int width, int height);
 
-int SDL_main(int argc, char* argv[])
+int main(int argc, char* argv[])
 {
     const char* packet_dump_path = argc >= 2 ? argv[1] : nullptr;
     bool dump_packets = argc >= 3 && argv[2][0] == '1';

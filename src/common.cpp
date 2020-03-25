@@ -1,7 +1,7 @@
 #pragma once
 
 #include "common.hpp"
-#include "miniz.h"
+#include "miniz/miniz.h"
 #include "glm/gtx/euler_angles.hpp"
 
 std::vector<uint8_t> decompress_zlib(uint8_t* data, int len)
