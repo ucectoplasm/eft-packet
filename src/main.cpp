@@ -161,8 +161,8 @@ int SDL_main(int argc, char* argv[])
 
     SDL_Init(SDL_INIT_EVERYTHING);
 
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 4);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 6);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
 
     SDL_GL_SetAttribute(SDL_GL_MULTISAMPLEBUFFERS, 1);
@@ -740,7 +740,7 @@ GraphicsState make_gfx(SDL_GLContext ctx, SDL_Window* window)
 
     GLuint vtx_shader = make_shader(GL_VERTEX_SHADER,
         R"(
-            #version 460 core
+            #version 330 core
 
             layout (location = 0) in vec3 pos;
             layout (location = 1) in vec2 tex_coord;
@@ -772,7 +772,7 @@ GraphicsState make_gfx(SDL_GLContext ctx, SDL_Window* window)
 
     GLuint pixel_shader = make_shader(GL_FRAGMENT_SHADER,
         R"(
-            #version 460 core
+            #version 330 core
 
             out vec4 FragColor;
             in float _alpha;
