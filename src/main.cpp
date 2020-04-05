@@ -27,8 +27,8 @@
 #define GLT_IMPLEMENTATION
 #include "gltext.h"
 
-// vvv FILL THIS IN
-#define DEVICE_IP "fill.me.in.with.your.local.network.adapter.ip"
+#define LOCAL_ADAPTER_IP_ADDRESS "fill.me.in" // ipconfig in cmd prompt on cheat machine, find local address, fill it in here
+#define MACHINE_PLAYING_GAME_IP_ADDRESS "fill.me.in" // the local IP address of the machine communicating with EFT servers
 
 struct Packet
 {
@@ -60,16 +60,13 @@ struct GraphicsState
     int height;
 };
 
-std::mutex g_world_lock;
-
 void do_net(std::vector<Packet> work, const char* packet_dump_path);
-void do_update();
 void do_render(GraphicsState* state);
 
 GraphicsState make_gfx(SDL_GLContext ctx, SDL_Window* window);
 void resize_gfx(GraphicsState* state, int width, int height);
 
-int main(int argc, char* argv[])
+int SDL_main(int argc, char* argv[])
 {
     const char* packet_dump_path = argc >= 2 ? argv[1] : nullptr;
     bool dump_packets = argc >= 3 && argv[2][0] == '1';
@@ -119,7 +116,7 @@ int main(int argc, char* argv[])
     }
     else
     {
-        dev = pcpp::PcapLiveDeviceList::getInstance().getPcapLiveDeviceByIp(DEVICE_IP);
+        dev = pcpp::PcapLiveDeviceList::getInstance().getPcapLiveDeviceByIp(LOCAL_ADAPTER_IP_ADDRESS);
         dev->open();
 
         pcpp::ProtoFilter filter(pcpp::UDP);
@@ -151,7 +148,7 @@ int main(int argc, char* argv[])
                 uint8_t* data_start = udp->getDataPtr(udp->getHeaderLen());
 
                 int timestamp = (int)(GetTickCount() - s_base_time);
-                bool outbound = src_ip == DEVICE_IP;
+                bool outbound = src_ip == MACHINE_PLAYING_GAME_IP_ADDRESS;
                 std::vector<uint8_t> data;
                 data.resize(len);
                 memcpy(data.data(), data_start, len);
@@ -164,11 +161,14 @@ int main(int argc, char* argv[])
 
     SDL_Init(SDL_INIT_EVERYTHING);
 
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 2);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 4);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 6);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
 
-    SDL_Window* win = SDL_CreateWindow("Bastian Suter's Queef", 100, 100, 1920, 1080, SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
+    SDL_GL_SetAttribute(SDL_GL_MULTISAMPLEBUFFERS, 1);
+    SDL_GL_SetAttribute(SDL_GL_MULTISAMPLESAMPLES, 8);
+
+    SDL_Window* win = SDL_CreateWindow("Bastian Suter's Queef II: UC Strikes Back", 100, 100, 1024, 768, SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
     SDL_GLContext ctx = SDL_GL_CreateContext(win);
 
     glewInit();
@@ -219,7 +219,6 @@ int main(int argc, char* argv[])
             }
         }
 
-        do_update();
         do_render(&gfx);
     }
 
@@ -249,26 +248,24 @@ struct FragmentedMessage
     std::vector<std::unique_ptr<std::vector<uint8_t>>> packets;
 };
 
-static std::unordered_map<int, FragmentedMessage> messages;
-
 void do_net(std::vector<Packet> work, const char* packet_dump_path)
 {
     auto write_packet = [packet_dump_path](Packet& packet)
     {
         if (packet_dump_path)
         {
-            FILE* file = fopen(packet_dump_path, "ab");
-            fwrite(&packet.outbound, sizeof(packet.outbound), 1, file);
-            fwrite(&packet.timestamp, 4, 1, file);
+            static FILE* s_file = fopen(packet_dump_path, "ab"); // handle technically leaks
+            fwrite(&packet.outbound, sizeof(packet.outbound), 1, s_file);
+            fwrite(&packet.timestamp, 4, 1, s_file);
             int len = (int)packet.data.size();
-            fwrite(&len, 4, 1, file);
-            fwrite(packet.data.data(), len, 1, file);
-            fclose(file);
+            fwrite(&len, 4, 1, s_file);
+            fwrite(packet.data.data(), len, 1, s_file);
         }
     };
 
     static std::unique_ptr<UNET::AcksCache> s_inbound_acks;
-    static std::unique_ptr<UNET::AcksCache> s_outbound_acks; // Technically it would be better to read acks from recieved packets for outbound
+    static std::unique_ptr<UNET::AcksCache> s_outbound_acks;
+    static std::unordered_map<int, FragmentedMessage> s_messages;
 
     for (Packet& packet : work)
     {
@@ -283,18 +280,16 @@ void do_net(std::vector<Packet> work, const char* packet_dump_path)
 
         if (uint16_t conn_id = UNET::decodeConnectionId(data_start); !conn_id)
         {
-            // This is a system message. We don't want to process it.
-            if (data_start[2] == UNET::kConnect)
+            if (data_start[2] == UNET::kConnect) // This is a connection attempt. Let's establish a state.
             {
                 s_inbound_acks = std::make_unique<UNET::AcksCache>("INBOUND");
                 s_outbound_acks = std::make_unique<UNET::AcksCache>("OUTBOUND");
+                s_messages.clear();
 
                 std::lock_guard<std::mutex> lock(g_world_lock);
-
-                // This is a connection attempt. Let's establish a state.
                 tk::g_state = std::make_unique<tk::GlobalState>();
                 tk::g_state->server_ip = packet.dst_ip.empty() ? "LOCAL_REPLAY" : packet.dst_ip;
-                tk::g_state->loot_db = std::make_unique<tk::LootDatabase>("items.json");
+                tk::g_state->loot_db = std::make_unique<tk::LootDatabase>();
             }
 
             write_packet(packet);
@@ -349,23 +344,24 @@ void do_net(std::vector<Packet> work, const char* packet_dump_path)
                     data->resize(user_len);
                     memcpy(data->data(), user_data, user_len);
                     int key = hr->fragmentedMessageId | channel << 8;
-                    messages[key].parts = hr->fragmentAmnt;
-                    messages[key].packets.resize(hr->fragmentAmnt);
 
-                    if (hr->fragmentIdx >= messages[key].packets.size())
+                    s_messages[key].parts = hr->fragmentAmnt;
+                    s_messages[key].packets.resize(hr->fragmentAmnt);
+
+                    if (hr->fragmentIdx >= s_messages[key].packets.size())
                     {
                         // broken fragment
                     }
                     else
                     {
-                        messages[key].packets[hr->fragmentIdx] = std::move(data);
+                        s_messages[key].packets[hr->fragmentIdx] = std::move(data);
                     }
 
                     bool complete = true;
 
                     for (int i = 0; i < hr->fragmentAmnt; ++i)
                     {
-                        if (!messages[key].packets[i])
+                        if (!s_messages[key].packets[i])
                         {
                             complete = false;
                             break;
@@ -376,14 +372,14 @@ void do_net(std::vector<Packet> work, const char* packet_dump_path)
                     {
                         for (int i = 1; i < hr->fragmentAmnt; ++i)
                         {
-                            messages[key].packets[0]->insert(
-                                std::end(*messages[key].packets[0]),
-                                std::begin(*messages[key].packets[i]),
-                                std::end(*messages[key].packets[i]));
+                            s_messages[key].packets[0]->insert(
+                                std::end(*s_messages[key].packets[0]),
+                                std::begin(*s_messages[key].packets[i]),
+                                std::end(*s_messages[key].packets[i]));
                         }
 
-                        complete_message = std::move(messages[key].packets[0]);
-                        messages.erase(key);
+                        complete_message = std::move(s_messages[key].packets[0]);
+                        s_messages.erase(key);
                     }
                 }
                 else
@@ -418,237 +414,301 @@ void do_net(std::vector<Packet> work, const char* packet_dump_path)
     }
 }
 
-void do_update()
+bool get_loot_information(tk::LootEntry* entry, bool include_equipment, bool* draw_text, bool* draw_beam, float* beam_height, int* r, int* g, int* b)
 {
+    // put your loot highlighting logic here
+    bool draw = true;
+    *r = 0;
+    *g = 0;
+    *b = 0;
+    *draw_beam = false;
+    *draw_text = !entry->unknown;
+
+    // highlight overrides all
+    if (entry->highlighted)
+    {
+        draw = true;
+        *draw_beam = true;
+        *beam_height = 200.0f;
+        *draw_text = true;
+        *r = 153;
+        *g = 101;
+        *b = 21;
+    }
+
+    return draw;
 }
 
 void do_render(GraphicsState* gfx)
 {
     // ye who read this code, judge its performance (and lack of state caching) not
-    std::lock_guard<std::mutex> lock(g_world_lock);
-
     glClearColor(0.5f, 0.5f, 0.5f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-    if (tk::g_state && tk::g_state->map)
     {
-        glm::mat4 view = glm::mat4(1.0f);
-        glm::mat4 projection = glm::mat4(1.0f);
+        std::lock_guard<std::mutex> lock(g_world_lock); // would be more efficient if we locked, gathered data, then unlocked, then rendered
 
-        projection = glm::perspective(glm::radians(75.0f), (float)gfx->width / (float)gfx->height, 0.1f, 2000.0f);
-
-        // flip x axis, from right handed (gl) to left handed (unity)
-        projection = glm::scale(projection, glm::vec3(-1.0f, 1.0f, 1.0f));
-
-        auto get_forward_vec = [](float pitch, float yaw, glm::vec3 pos)
+        if (tk::g_state && tk::g_state->map)
         {
-            float elevation = glm::radians(-pitch);
-            float heading = glm::radians(yaw);
-            glm::vec3 forward_vec(cos(elevation) * sin(heading), sin(elevation), cos(elevation) * cos(heading));
-            return forward_vec;
-        };
+            glm::mat4 projection = glm::perspective(glm::radians(75.0f), (float)gfx->width / (float)gfx->height, 0.1f, 2000.0f);
 
-        auto get_alpha_for_y = [](float y1, float y2)
-        {
-            return abs(y1 - y2) >= 3.0f ? 63 : 255;
-        };
+            // flip x axis, from right handed (gl) to left handed (unity)
+            projection = glm::scale(projection, glm::vec3(-1.0f, 1.0f, 1.0f));
 
-        tk::g_state->map->lock();
-
-        float player_y = 0.0f;
-        glm::vec3 player_forward_vec;
-
-        if (tk::Observer* player = tk::g_state->map->get_player_manual_lock(); player)
-        {
-            player_y = player->pos.y;
-            float pitch = player->rot.y;
-            float yaw = player->rot.x;
-            glm::vec3 cam_at(player->pos.x, player->pos.y + 1.5f, player->pos.z);
-            player_forward_vec = get_forward_vec(pitch, yaw, cam_at);
-            glm::vec3 cam_look = cam_at + player_forward_vec;
-            view = glm::lookAt(cam_at, cam_look, { 0.0f, 1.0f, 0.0f });
-
-            glUseProgram(gfx->shader);
-            glUniform1f(glGetUniformLocation(gfx->shader, "player_y"), player_y);
-            glUniformMatrix4fv(glGetUniformLocation(gfx->shader, "projection"), 1, GL_FALSE, &projection[0][0]);
-            glUniformMatrix4fv(glGetUniformLocation(gfx->shader, "view"), 1, GL_FALSE, &view[0][0]);
-
-            auto draw_text = [&gfx]
-                (float x, float y, float z, float scale, const char* txt, int r, int g, int b, int a, glm::mat4* view, glm::mat4* proj)
+            auto get_forward_vec = [](float pitch, float yaw, glm::vec3 pos)
             {
-                GLTtext* text = gltCreateText();
-                gltSetText(text, txt);
-                gltBeginDraw();
-                gltColor(r / 255.0f, g / 255.0f, b / 255.0f, a / 255.0f);
-                gltDrawText3D(text, x - gltGetTextWidth(text, scale) * 0.5f, y, z, scale, (GLfloat*)&view[0][0], (GLfloat*)&proj[0][0]);
-                gltDeleteText(text);
+                float elevation = glm::radians(-pitch);
+                float heading = glm::radians(yaw);
+                glm::vec3 forward_vec(cos(elevation) * sin(heading), sin(elevation), cos(elevation) * cos(heading));
+                return forward_vec;
             };
 
-            auto draw_box = [&gfx]
-                (float x, float y, float z, float scale_x, float scale_y, float scale_z, int r, int g, int b)
+            auto get_alpha_for_y = [](float y1, float y2)
             {
-                glm::mat4 model = glm::mat4(1.0f);
-                glm::vec3 pos(x, y, z);
-                model = glm::translate(model, pos) * glm::scale(model, glm::vec3(scale_x, scale_y, scale_z));
+                return abs(y1 - y2) >= 3.0f ? 63 : 255;
+            };
+
+            float player_y = 0.0f;
+            glm::vec3 player_forward_vec;
+
+            if (tk::Observer* player = tk::g_state->map->get_player(); player)
+            {
+                player_y = player->pos.y;
+                float pitch = player->rot.y;
+                float yaw = player->rot.x;
+                glm::vec3 cam_at(player->pos.x, player->pos.y + 1.5f, player->pos.z);
+                player_forward_vec = get_forward_vec(pitch, yaw, cam_at);
+                glm::vec3 cam_look = cam_at + player_forward_vec;
+                glm::mat4 view = glm::lookAt(cam_at, cam_look, { 0.0f, 1.0f, 0.0f });
+
                 glUseProgram(gfx->shader);
-                glUniform1i(glGetUniformLocation(gfx->shader, "line"), 0);
-                glUniform1f(glGetUniformLocation(gfx->shader, "obj_y"), y - (scale_y / 2.0f));
-                glUniform3f(glGetUniformLocation(gfx->shader, "color"), r / 255.0f, g / 255.0f, b / 255.0f);
-                glUniformMatrix4fv(glGetUniformLocation(gfx->shader, "model"), 1, GL_FALSE, &model[0][0]);
-                glBindVertexArray(gfx->vao);
-                glBindBuffer(GL_ARRAY_BUFFER, gfx->vbo);
-                glDrawArrays(GL_TRIANGLES, 0, 36);
-            };
+                glUniform1f(glGetUniformLocation(gfx->shader, "player_y"), player_y);
+                glUniformMatrix4fv(glGetUniformLocation(gfx->shader, "projection"), 1, GL_FALSE, &projection[0][0]);
+                glUniformMatrix4fv(glGetUniformLocation(gfx->shader, "view"), 1, GL_FALSE, &view[0][0]);
 
-            auto draw_line = [&gfx]
-                (float x, float y, float z, float to_x, float to_y, float to_z, int r, int g, int b, int a)
-            {
-                float vertices[] = {
-                    x, y, z,
-                    to_x, to_y, to_z,
+                auto draw_text = [&gfx]
+                    (float x, float y, float z, float scale, const char* txt, int r, int g, int b, int a, glm::mat4* view, glm::mat4* proj)
+                {
+                    GLTtext* text = gltCreateText();
+                    gltSetText(text, txt);
+                    gltBeginDraw();
+                    gltColor(r / 255.0f, g / 255.0f, b / 255.0f, a / 255.0f);
+                    gltDrawText3D(text, x, y, z, scale, (GLfloat*)&view[0][0], (GLfloat*)&proj[0][0]);
+                    gltEndDraw();
+                    gltDeleteText(text);
                 };
 
-                glUseProgram(gfx->shader);
-                glUniform1i(glGetUniformLocation(gfx->shader, "line"), a);
-                glUniform3f(glGetUniformLocation(gfx->shader, "color"), r / 255.0f, g / 255.0f, b / 255.0f);
-                glBindBuffer(GL_ARRAY_BUFFER, gfx->line_vbo);
-                glBindVertexArray(gfx->line_vao);
-                glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STREAM_DRAW);
-                glDrawArrays(GL_LINES, 0, 2);
-            };
-
-            static std::unordered_map<std::string, std::tuple<uint8_t, uint8_t, uint8_t>> s_group_map; // maybe reset on map change?
-
-            for (tk::Observer* obs : tk::g_state->map->get_observers_manual_lock())
-            {
-                if (obs->type == tk::Observer::Self)
+                auto draw_box = [&gfx]
+                    (float x, float y, float z, float scale_x, float scale_y, float scale_z, int r, int g, int b)
                 {
-                    glm::vec3 at(obs->pos.x, obs->pos.y, obs->pos.z);
-                    glm::vec3 look = at + (get_forward_vec(obs->rot.y, obs->rot.x, at) * 50.0f);
-                    look.y += 1.5f;
-                    draw_line(at.x, at.y, at.z, look.x, look.y, look.z, 0, 255, 0, 255);
-                    continue;
-                }
+                    glm::mat4 model = glm::mat4(1.0f);
+                    glm::vec3 pos(x, y, z);
+                    model = glm::translate(model, pos) * glm::scale(model, glm::vec3(scale_x, scale_y, scale_z));
+                    glUseProgram(gfx->shader);
+                    glUniform1i(glGetUniformLocation(gfx->shader, "line"), 0);
+                    glUniform1f(glGetUniformLocation(gfx->shader, "obj_y"), y - (scale_y / 2.0f));
+                    glUniform3f(glGetUniformLocation(gfx->shader, "color"), r / 255.0f, g / 255.0f, b / 255.0f);
+                    glUniformMatrix4fv(glGetUniformLocation(gfx->shader, "model"), 1, GL_FALSE, &model[0][0]);
+                    glBindVertexArray(gfx->vao);
+                    glBindBuffer(GL_ARRAY_BUFFER, gfx->vbo);
+                    glDrawArrays(GL_TRIANGLES, 0, 36);
+                };
 
-                uint8_t r = 0;
-                uint8_t g = 0;
-                uint8_t b = 0;
-
-                float scale_x = 1.0f;
-                float scale_y = 2.0f;
-                float scale_z = 1.0f;
-
-                if (obs->is_unspawned)
+                auto draw_line = [&gfx]
+                    (float x, float y, float z, float to_x, float to_y, float to_z, int r, int g, int b, int a)
                 {
-                    r = 179;
-                    g = 120;
-                    b = 211;
-                }
-                else
-                {
-                    if (obs->is_dead)
+                    float vertices[] =
                     {
-                        scale_x = 2.0f;
-                        scale_y = 1.0f;
+                        x, y, z,
+                        to_x, to_y, to_z,
+                    };
+
+                    glUseProgram(gfx->shader);
+                    glUniform1i(glGetUniformLocation(gfx->shader, "line"), a);
+                    glUniform3f(glGetUniformLocation(gfx->shader, "color"), r / 255.0f, g / 255.0f, b / 255.0f);
+                    glBindBuffer(GL_ARRAY_BUFFER, gfx->line_vbo);
+                    glBindVertexArray(gfx->line_vao);
+                    glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STREAM_DRAW);
+                    glDrawArrays(GL_LINES, 0, 2);
+                };
+
+                static std::unordered_map<std::string, std::tuple<uint8_t, uint8_t, uint8_t>> s_group_map; // maybe reset on map change?
+
+                for (tk::Observer* obs : tk::g_state->map->get_observers())
+                {
+                    if (obs->type == tk::Observer::Self)
+                    {
+                        glm::vec3 at(obs->pos.x, obs->pos.y, obs->pos.z);
+                        glm::vec3 look = at + (get_forward_vec(obs->rot.y, obs->rot.x, at) * 50.0f);
+                        look.y += 1.5f;
+                        draw_line(at.x, at.y, at.z, look.x, look.y, look.z, 0, 255, 0, 255);
+                        continue;
                     }
 
-                    if (obs->type == tk::Observer::Scav && obs->is_npc)
+                    uint8_t r = 0;
+                    uint8_t g = 0;
+                    uint8_t b = 0;
+
+                    float scale_x = 1.0f;
+                    float scale_y = 2.0f;
+                    float scale_z = 1.0f;
+
+                    if (obs->is_unspawned)
                     {
-                        r = 255;
-                        g = obs->is_dead ? 140 : 255;
+                        r = 179;
+                        g = 120;
+                        b = 211;
                     }
                     else
                     {
-                        r = obs->is_dead ? 139 : 255;
-                    }
-                }
+                        if (obs->is_dead)
+                        {
+                            scale_x = 2.0f;
+                            scale_y = 1.0f;
+                        }
 
-                if (!obs->group_id.empty())
-                {
-                    if (obs->group_id == player->group_id)
+                        if (obs->type == tk::Observer::Scav && obs->is_npc)
+                        {
+                            r = 255;
+                            g = obs->is_dead ? 140 : 255;
+                        }
+                        else
+                        {
+                            r = obs->is_dead ? 139 : 255;
+                        }
+                    }
+
+                    if (!obs->group_id.empty())
                     {
-                        r = 0;
-                        g = 255;
-                        b = 0;
+                        if (obs->group_id == player->group_id)
+                        {
+                            r = 0;
+                            g = 255;
+                            b = 0;
+                        }
+                        else if (auto entry = s_group_map.find(obs->group_id); entry == std::end(s_group_map))
+                        {
+                            s_group_map[obs->group_id] = std::make_tuple(rand() % 256, rand() % 256, rand() % 256);
+                        }
                     }
-                    else if (auto entry = s_group_map.find(obs->group_id); entry == std::end(s_group_map))
+
+                    if (!obs->is_dead && !obs->is_unspawned)
                     {
-                        s_group_map[obs->group_id] = std::make_tuple(rand() % 256, rand() % 256, rand() % 256);
+                        glm::vec3 at(obs->pos.x, obs->pos.y, obs->pos.z);
+                        glm::vec3 enemy_forward_vec = get_forward_vec(obs->rot.y, obs->rot.x, at);
+                        bool facing_towards_player = glm::dot(player_forward_vec, enemy_forward_vec) < -0.0f;
+                        int alpha = facing_towards_player ? 255 : 63;
+                        glm::vec3 look = at + (enemy_forward_vec * (facing_towards_player ? 75.0f : 12.5f));
+                        draw_line(at.x, at.y, at.z, look.x, look.y, look.z, r, g, b, alpha);
                     }
+
+                    draw_box(obs->pos.x, obs->pos.y, obs->pos.z, scale_x, scale_y, scale_z, r, g, b);
                 }
 
-                if (!obs->is_dead && !obs->is_unspawned)
+                for (Vector3* pos : tk::g_state->map->get_static_corpses())
                 {
-                    glm::vec3 at(obs->pos.x, obs->pos.y, obs->pos.z);
-                    glm::vec3 enemy_forward_vec = get_forward_vec(obs->rot.y, obs->rot.x, at);
-                    bool facing_towards_player = glm::dot(player_forward_vec, enemy_forward_vec) < -0.0f;
-                    int alpha = facing_towards_player ? 255 : 63;
-                    glm::vec3 look = at + (enemy_forward_vec * (facing_towards_player ? 75.0f : 12.5f));
-                    draw_line(at.x, at.y, at.z, look.x, look.y, look.z, r, g, b, alpha);
+                    draw_box(pos->x, pos->y, pos->z, 2.0f, 1.0f, 1.0f, 102, 0, 102);
                 }
 
-                draw_box(obs->pos.x, obs->pos.y, obs->pos.z, scale_x, scale_y, scale_z, r, g, b);
-            }
+                std::vector<std::tuple<Vector3, std::string, int, int, int>> loot_text_to_render;
 
-            for (Vector3* pos : tk::g_state->map->get_static_corpses_manual_lock())
-            {
-                draw_box(pos->x, pos->y, pos->z, 2.0f, 1.0f, 1.0f, 102, 0, 102);
-            }
-
-            std::vector<std::pair<Vector3, std::string>> loot_text_to_render;
-
-            auto draw_loot = [&](tk::LootEntry* entry, bool include_equipment = true)
-            {
-                // This is where you insert your loot highlighting logic.
-                draw_box(entry->pos.x, entry->pos.y, entry->pos.z, 0.5f, 0.5f, 0.5f, entry->container ? 255 : 0, entry->container ? 215 : 0, 0);
-            };
-
-            for (tk::LootEntry* entry : tk::g_state->map->get_loot_manual_lock())
-            {
-                draw_loot(entry);
-            }
-
-            for (tk::TemporaryLoot* entry : tk::g_state->map->get_temporary_loots_manual_lock())
-            {
-                draw_box(entry->pos.x, entry->pos.y + 1.5f, entry->pos.z, 0.15f, 3.0f, 0.15f, 0, 200, 200);
-                draw_box(entry->pos.x, entry->pos.y, entry->pos.z, 0.25f, 0.25f, 0.25f, 0, 200, 200);
-            }
-
-            for (tk::Observer* obs : tk::g_state->map->get_observers_manual_lock())
-            {
-                if (obs->type == tk::Observer::ObserverType::Self)
+                auto draw_loot = [&](tk::LootEntry* entry, bool include_equipment = true)
                 {
-                    continue;
-                }
+                    bool draw_text, draw_beam;
+                    float beam_height;
+                    int r, g, b;
+                    bool draw = get_loot_information(entry, include_equipment, &draw_text, &draw_beam, &beam_height, &r, &g, &b);
 
-                int r = 255;
-                int g = 255;
-                int b = 255;
+                    if (draw)
+                    {
+                        glm::vec3 player_pos(player->pos.x, player->pos.y, player->pos.z);
+                        glm::vec3 entry_pos(entry->pos.x, entry->pos.y, entry->pos.z);
 
-                if (auto entry = s_group_map.find(obs->group_id); entry != std::end(s_group_map))
+                        static constexpr float MIN_DISTANCE_FOR_LOOT = 10.0f;
+                        if (float distance = glm::length(entry_pos - player_pos); distance >= MIN_DISTANCE_FOR_LOOT)
+                        {
+                            if (draw_text)
+                            {
+                                loot_text_to_render.push_back(std::make_tuple(entry->pos, entry->name, r, g, b));
+                            }
+
+                            if (draw_beam)
+                            {
+                                draw_box(entry->pos.x, entry->pos.y + beam_height / 2.0f, entry->pos.z, 0.3f, beam_height, 0.3f, r, g, b);
+                            }
+                        }
+
+                        draw_box(entry->pos.x, entry->pos.y, entry->pos.z, 0.3f, 0.3f, 0.3f, r, g, b);
+                    }
+                };
+
+                for (tk::LootEntry* entry : tk::g_state->map->get_loot())
                 {
-                    r = std::get<0>(entry->second);
-                    g = std::get<1>(entry->second);
-                    b = std::get<2>(entry->second);
+                    draw_loot(entry);
                 }
 
-                glm::vec3 player_pos(player->pos.x, player->pos.y, player->pos.z);
-                glm::vec3 obs_pos(obs->pos.x, obs->pos.y, obs->pos.z);
-                draw_text(obs->pos.x, obs->pos.y + 3.0f, obs->pos.z, 0.25f, std::to_string((int)glm::length(obs_pos - player_pos)).c_str(), r, g, b, get_alpha_for_y(player_y, obs->pos.y), &view, &projection);
-                draw_text(obs->pos.x, obs->pos.y + 2.0f, obs->pos.z, 0.05f, obs->name.c_str(), r, g, b, get_alpha_for_y(player_y, obs->pos.y), &view, &projection);
-            }
+                for (tk::TemporaryLoot* entry : tk::g_state->map->get_temporary_loots())
+                {
+                    draw_box(entry->pos.x, entry->pos.y + 1.5f, entry->pos.z, 0.15f, 3.0f, 0.15f, 0, 200, 200);
+                    draw_box(entry->pos.x, entry->pos.y, entry->pos.z, 0.25f, 0.25f, 0.25f, 0, 200, 200);
+                }
 
-            for (auto& [pos, txt] : loot_text_to_render)
-            {
-                draw_text(pos.x, pos.y + 0.5f, pos.z, 0.05f, txt.c_str(), 255, 215, 0, get_alpha_for_y(player_y, pos.y), &view, &projection);
+                for (tk::Observer* obs : tk::g_state->map->get_observers())
+                {
+                    if (obs->type == tk::Observer::ObserverType::Self)
+                    {
+                        continue;
+                    }
+
+                    int r = 255;
+                    int g = 255;
+                    int b = 255;
+
+                    if (auto entry = s_group_map.find(obs->group_id); entry != std::end(s_group_map))
+                    {
+                        r = std::get<0>(entry->second);
+                        g = std::get<1>(entry->second);
+                        b = std::get<2>(entry->second);
+                    }
+
+                    glm::vec3 player_pos(player->pos.x, player->pos.y, player->pos.z);
+                    glm::vec3 obs_pos(obs->pos.x, obs->pos.y, obs->pos.z);
+
+                    static constexpr float MIN_DISTANCE_FOR_DISTANCE = 30.0f;
+                    if (float distance = glm::length(obs_pos - player_pos); distance >= MIN_DISTANCE_FOR_DISTANCE)
+                    {
+                        draw_text(obs->pos.x, obs->pos.y + 3.0f, obs->pos.z, 0.25f, std::to_string((int)distance).c_str(), r, g, b, get_alpha_for_y(player_y, obs->pos.y), &view, &projection);
+                    }
+
+                    int total_val = 0;
+
+                    for (tk::LootEntry& entry : obs->inventory)
+                    {
+                        entry.pos = obs->pos;
+                        entry.pos.y += 0.5f;
+                        draw_loot(&entry, false);
+                        total_val += entry.value;
+                    }
+
+                    std::string val(16, '\0');
+                    val.resize(std::snprintf(val.data(), val.size(), "%.1f", total_val / 1000.0f));
+                    std::string name_and_val = obs->name + " (" + val + "k)";
+                    draw_text(obs->pos.x, obs->pos.y + 2.0f, obs->pos.z, 0.05f, name_and_val.c_str(), r, g, b, get_alpha_for_y(player_y, obs->pos.y), &view, &projection);
+                }
+
+                for (auto& [pos, txt, r, g, b] : loot_text_to_render)
+                {
+                    draw_text(pos.x, pos.y + 0.5f, pos.z, 0.05f, txt.c_str(), r, g, b, get_alpha_for_y(player_y, pos.y), &view, &projection);
+                }
+
+                // TODO: Render
+                // Sort text by distance from camera and render in order to fix transparency overlap.
             }
         }
-
-        tk::g_state->map->unlock();
     }
 
     SDL_GL_SwapWindow(gfx->window);
-    SDL_Delay(33);
+    SDL_Delay(32);
 }
 
 GraphicsState make_gfx(SDL_GLContext ctx, SDL_Window* window)
@@ -672,6 +732,7 @@ GraphicsState make_gfx(SDL_GLContext ctx, SDL_Window* window)
         {
             char info[512];
             glGetShaderInfoLog(handle, 512, NULL, info);
+            printf("Failed to compile shader: %s\n", info);
         };
 
         return handle;
@@ -679,11 +740,12 @@ GraphicsState make_gfx(SDL_GLContext ctx, SDL_Window* window)
 
     GLuint vtx_shader = make_shader(GL_VERTEX_SHADER,
         R"(
-            #version 330 core
-            layout (location = 0) in vec3 aPos;
-            layout (location = 1) in vec2 aTexCoord;
+            #version 460 core
 
-            out float Alpha;
+            layout (location = 0) in vec3 pos;
+            layout (location = 1) in vec2 tex_coord;
+
+            out float _alpha;
 
             uniform mat4 model;
             uniform mat4 view;
@@ -696,13 +758,13 @@ GraphicsState make_gfx(SDL_GLContext ctx, SDL_Window* window)
             {
                 if (line > 0)
                 {
-                    gl_Position = projection * view * vec4(aPos, 1.0f);
-                    Alpha = line / 255.0f;
+                    gl_Position = projection * view * vec4(pos, 1.0f);
+                    _alpha = line / 255.0f;
                 }
                 else
                 {
-                    gl_Position = projection * view * model * vec4(aPos, 1.0f);
-                    Alpha = abs(player_y - obj_y) >= 3.0f ? 0.25f : 1.0f;
+                    gl_Position = projection * view * model * vec4(pos, 1.0f);
+                    _alpha = abs(player_y - obj_y) >= 3.0f ? 0.25f : 1.0f;
                 }
             }
         )"
@@ -710,16 +772,15 @@ GraphicsState make_gfx(SDL_GLContext ctx, SDL_Window* window)
 
     GLuint pixel_shader = make_shader(GL_FRAGMENT_SHADER,
         R"(
-            #version 330 core
+            #version 460 core
+
             out vec4 FragColor;
-
-            in float Alpha;
-
+            in float _alpha;
             uniform vec3 color;
 
             void main()
             {
-                FragColor = vec4(color, Alpha);
+                FragColor = vec4(color, _alpha);
             }
         )"
     );

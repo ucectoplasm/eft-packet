@@ -4,49 +4,50 @@
 
 namespace tk
 {
-    LootDatabase::LootDatabase(const char* path)
+    LootDatabase::LootDatabase()
     {
-        FILE* file = fopen(path, "rb");
-
-        if (file)
+        auto load_file_as_json = [](const char* path) -> json11::Json
         {
-            fseek(file, 0, SEEK_END);
-            int len = ftell(file);
-            fseek(file, 0, SEEK_SET);
+            FILE* file = fopen(path, "rb");
 
-            std::vector<char> data;
-            data.resize(len + 1);
-            fread(data.data(), 1, len, file);
-            data[data.size() - 1] = '\0';
+            json11::Json json;
 
-            fclose(file);
+            if (file)
+            {
+                fseek(file, 0, SEEK_END);
+                int len = ftell(file);
+                fseek(file, 0, SEEK_SET);
 
-            std::string err;
-            json11::Json json = json11::Json::parse(data.data(), err);
+                std::vector<char> data;
+                data.resize(len + 1);
+                fread(data.data(), 1, len, file);
+                data[data.size() - 1] = '\0';
 
-            for (auto data_entry : json["data"].object_items())
+                fclose(file);
+
+                std::string err;
+                json = json11::Json::parse(data.data(), err, json11::COMMENTS);
+            }
+
+            return json;
+        };
+
+        { // First pass - open item templates.
+            auto templates = load_file_as_json("db_templates.json");
+
+            for (auto& data_entry : templates.object_items())
             {
                 LootItem item;
                 item.id = data_entry.first;
 
                 auto props = data_entry.second["_props"];
 
-                if (props["Name"].is_string())
-                {
-                    item.name = props["Name"].string_value();
-                }
-                else if (props["ShortName"].is_string())
-                {
-                    item.name = props["ShortName"].string_value();
-                }
-                else if (data_entry.second["_name"].is_string())
-                {
-                    item.name = data_entry.second["_name"].string_value();
-                }
-
+                item.name = props["Name"].string_value();
                 item.value = props["CreditsPrice"].int_value();
                 item.lootable = !props["Unlootable"].bool_value();
                 item.bundle_path = props["Prefab"]["path"].string_value();
+                item.width = props["Width"].int_value();
+                item.height = props["Height"].int_value();
 
                 item.rarity = LootItem::Common;
 
@@ -63,7 +64,58 @@ namespace tk
                     item.rarity = LootItem::NotExist;
                 }
 
+                item.overriden = false;
+
                 m_db[item.id] = std::move(item);
+            }
+        }
+
+        { // Second pass - correct name with localization.
+            auto locale = load_file_as_json("db_locale.json");
+            for (auto& data_entry : locale["templates"].object_items())
+            {
+                auto iter = m_db.find(data_entry.first);
+                if (iter != std::end(m_db))
+                {
+                    iter->second.name = data_entry.second["Name"].string_value();
+                }
+            }
+
+        }
+
+        { // Third pass - correct price.
+            auto prices = load_file_as_json("db_prices.json");
+            for (auto& data_array_entry : prices.array_items())
+            {
+                auto iter = m_db.find(data_array_entry["template"].string_value());
+                if (iter != std::end(m_db))
+                {
+                    iter->second.value = data_array_entry["price"].int_value();
+                }
+            }
+        }
+
+        { // Fourth pass - manual prices
+            auto prices = load_file_as_json("db_manualprices.json");
+            for (auto data_entry : prices.object_items())
+            {
+                auto iter = m_db.find(data_entry.first);
+                if (iter != std::end(m_db))
+                {
+                    iter->second.value = data_entry.second.int_value();
+                }
+            }
+        }
+
+        { // Fifth pass - manual override
+            auto overrides = load_file_as_json("db_questlewts.json");
+            for (auto data_entry : overrides["questlewts"].array_items())
+            {
+                auto iter = m_db.find(data_entry.string_value());
+                if (iter != std::end(m_db))
+                {
+                    iter->second.overriden = true;
+                }
             }
         }
     }
@@ -73,8 +125,6 @@ namespace tk
         auto entry = m_db.find(id);
         return entry == std::end(m_db) ? nullptr : &entry->second;
     }
-
-    std::unique_ptr<Polymorph> read_polymorph(CSharpByteStream* stream);
 
     std::vector<std::unique_ptr<Polymorph>> read_polymorphs(uint8_t* data, int size)
     {
@@ -105,25 +155,44 @@ namespace tk
 
         switch (type)
         {
-            case Polymorph::FoodDrinkComponentDescriptor: return make_polymorph<FoodDrinkComponentDescriptor>(stream, type);
-            case Polymorph::ResourceItemComponentDescriptor: return make_polymorph<ResourceItemComponentDescriptor>(stream, type);
-            case Polymorph::LightComponentDescriptor: return make_polymorph<LightComponentDescriptor>(stream, type);
-            case Polymorph::LockableComponentDescriptor: return make_polymorph<LockableComponentDescriptor>(stream, type);
-            case Polymorph::MapComponentDescriptor: return make_polymorph< MapComponentDescriptor>(stream, type);
-            case Polymorph::MedKitComponentDescriptor: return make_polymorph<MedKitComponentDescriptor>(stream, type);
-            case Polymorph::RepairableComponentDescriptor: return make_polymorph<RepairableComponentDescriptor>(stream, type);
-            case Polymorph::SightComponentDescriptor: return make_polymorph<SightComponentDescriptor>(stream, type);
-            case Polymorph::TogglableComponentDescriptor: return make_polymorph<TogglableComponentDescriptor>(stream, type);
-            case Polymorph::FaceShieldComponentDescriptor: return make_polymorph<FaceShieldComponentDescriptor>(stream, type);
-            case Polymorph::FoldableComponentDescriptor: return make_polymorph<FoldableComponentDescriptor>(stream, type);
-            case Polymorph::FireModeComponentDescriptor: return make_polymorph<FireModeComponentDescriptor>(stream, type);
-            case Polymorph::DogTagComponentDescriptor: return make_polymorph<DogTagComponentDescriptor>(stream, type);
-            case Polymorph::TagComponentDescriptor: return make_polymorph<TagComponentDescriptor>(stream, type);
-            case Polymorph::KeyComponentDescriptor: return make_polymorph<KeyComponentDescriptor>(stream, type);
-            case Polymorph::JsonLootItemDescriptor: return make_polymorph<JsonLootItemDescriptor>(stream, type);
-            case Polymorph::JsonCorpseDescriptor: return make_polymorph<JsonCorpseDescriptor>(stream, type);
-            case Polymorph::ApplyHealthOperationDescriptor: return make_polymorph<ApplyHealthOperationDescriptor>(stream, type);
-            case Polymorph::OperateStationaryWeaponOperationDescription: return make_polymorph<OperateStationaryWeaponOperationDescription>(stream, type);
+            case Polymorph::Type::FoodDrinkComponentDescriptor: return make_polymorph<FoodDrinkComponentDescriptor>(stream, type);
+            case Polymorph::Type::ResourceItemComponentDescriptor: return make_polymorph<ResourceItemComponentDescriptor>(stream, type);
+            case Polymorph::Type::LightComponentDescriptor: return make_polymorph<LightComponentDescriptor>(stream, type);
+            case Polymorph::Type::LockableComponentDescriptor: return make_polymorph<LockableComponentDescriptor>(stream, type);
+            case Polymorph::Type::MapComponentDescriptor: return make_polymorph< MapComponentDescriptor>(stream, type);
+            case Polymorph::Type::MedKitComponentDescriptor: return make_polymorph<MedKitComponentDescriptor>(stream, type);
+            case Polymorph::Type::RepairableComponentDescriptor: return make_polymorph<RepairableComponentDescriptor>(stream, type);
+            case Polymorph::Type::SightComponentDescriptor: return make_polymorph<SightComponentDescriptor>(stream, type);
+            case Polymorph::Type::TogglableComponentDescriptor: return make_polymorph<TogglableComponentDescriptor>(stream, type);
+            case Polymorph::Type::FaceShieldComponentDescriptor: return make_polymorph<FaceShieldComponentDescriptor>(stream, type);
+            case Polymorph::Type::FoldableComponentDescriptor: return make_polymorph<FoldableComponentDescriptor>(stream, type);
+            case Polymorph::Type::FireModeComponentDescriptor: return make_polymorph<FireModeComponentDescriptor>(stream, type);
+            case Polymorph::Type::DogTagComponentDescriptor: return make_polymorph<DogTagComponentDescriptor>(stream, type);
+            case Polymorph::Type::TagComponentDescriptor: return make_polymorph<TagComponentDescriptor>(stream, type);
+            case Polymorph::Type::KeyComponentDescriptor: return make_polymorph<KeyComponentDescriptor>(stream, type);
+            case Polymorph::Type::JsonLootItemDescriptor: return make_polymorph<JsonLootItemDescriptor>(stream, type);
+            case Polymorph::Type::JsonCorpseDescriptor: return make_polymorph<JsonCorpseDescriptor>(stream, type);
+            case Polymorph::Type::InventorySlotItemAddressDescriptor: return make_polymorph<InventorySlotItemAddressDescriptor>(stream, type);
+            case Polymorph::Type::InventoryStackSlotItemAddress: return make_polymorph<InventoryStackSlotItemAddress>(stream, type);
+            case Polymorph::Type::InventoryContainerDescriptor: return make_polymorph<InventoryContainerDescriptor>(stream, type);
+            case Polymorph::Type::InventoryGridItemAddressDescriptor: return make_polymorph<InventoryGridItemAddressDescriptor>(stream, type);
+            case Polymorph::Type::InventoryOwnerItselfDescriptor: return make_polymorph<InventoryOwnerItselfDescriptor>(stream, type);
+            case Polymorph::Type::InventoryRemoveOperationDescriptor: return make_polymorph<InventoryRemoveOperationDescriptor>(stream, type);
+            case Polymorph::Type::InventoryExamineOperationDescriptor: return make_polymorph<InventoryExamineOperationDescriptor>(stream, type);
+            case Polymorph::Type::InventoryCheckMagazineOperationDescriptor: return make_polymorph<InventoryCheckMagazineOperationDescriptor>(stream, type);
+            case Polymorph::Type::InventoryBindItemOperationDescriptor: return make_polymorph<InventoryBindItemOperationDescriptor>(stream, type);
+            case Polymorph::Type::InventoryMoveOperationDescriptor: return make_polymorph<InventoryMoveOperationDescriptor>(stream, type);
+            case Polymorph::Type::InventorySplitOperationDescriptor: return make_polymorph<InventorySplitOperationDescriptor>(stream, type);
+            case Polymorph::Type::InventoryMergeOperationDescriptor: return make_polymorph<InventoryMergeOperationDescriptor>(stream, type);
+            case Polymorph::Type::InventoryTransferOperationDescriptor: return make_polymorph<InventoryTransferOperationDescriptor>(stream, type);
+            case Polymorph::Type::InventorySwapOperationDescriptor: return make_polymorph<InventorySwapOperationDescriptor>(stream, type);
+            case Polymorph::Type::InventoryThrowOperationDescriptor: return make_polymorph<InventoryThrowOperationDescriptor>(stream, type);
+            case Polymorph::Type::InventoryToggleOperationDescriptor: return make_polymorph<InventoryToggleOperationDescriptor>(stream, type);
+            case Polymorph::Type::InventoryFoldOperationDescriptor: return make_polymorph<InventoryFoldOperationDescriptor>(stream, type);
+            case Polymorph::Type::InventoryShotOperationDescriptor: return make_polymorph<InventoryShotOperationDescriptor>(stream, type);
+            case Polymorph::Type::SetupItemOperationDescriptor: return make_polymorph<SetupItemOperationDescriptor>(stream, type);
+            case Polymorph::Type::ApplyHealthOperationDescriptor: return make_polymorph<ApplyHealthOperationDescriptor>(stream, type);
+            case Polymorph::Type::OperateStationaryWeaponOperationDescription: return make_polymorph<OperateStationaryWeaponOperationDescription>(stream, type);
             default: __debugbreak(); assert(false); break;
         }
 
@@ -383,6 +452,137 @@ namespace tk
         random_rotation = stream->ReadBool();
         shift = stream->ReadVector();
         platform_id = stream->ReadInt16();
+    }
+
+    void InventorySlotItemAddressDescriptor::read(CSharpByteStream* stream)
+    {
+        container.read(stream);
+    }
+
+    void InventoryStackSlotItemAddress::read(CSharpByteStream* stream)
+    {
+        container.read(stream);
+    }
+
+    void InventoryContainerDescriptor::read(CSharpByteStream* stream)
+    {
+        parent_id = stream->ReadString();
+        container_id = stream->ReadString();
+    }
+
+    void InventoryGridItemAddressDescriptor::read(CSharpByteStream* stream)
+    {
+        location_in_grid.read(stream);
+        container.read(stream);
+    }
+
+    void InventoryOwnerItselfDescriptor::read(CSharpByteStream* stream)
+    {
+        container.read(stream);
+    }
+
+    void InventoryRemoveOperationDescriptor::read(CSharpByteStream* stream)
+    {
+        item_id = stream->ReadString();
+        operation_id = stream->ReadUInt16();
+    }
+
+    void InventoryExamineOperationDescriptor::read(CSharpByteStream* stream)
+    {
+        item_id = stream->ReadString();
+        operation_id = stream->ReadUInt16();
+    }
+
+    void InventoryCheckMagazineOperationDescriptor::read(CSharpByteStream* stream)
+    {
+        item_id = stream->ReadString();
+        check_status = stream->ReadBool();
+        skill_level = stream->ReadInt32();
+        operation_id = stream->ReadUInt16();
+    }
+
+    void InventoryBindItemOperationDescriptor::read(CSharpByteStream* stream)
+    {
+        item_id = stream->ReadString();
+        index = stream->ReadInt32();
+        operation_id = stream->ReadUInt16();
+    }
+
+    void InventoryMoveOperationDescriptor::read(CSharpByteStream* stream)
+    {
+        item_id = stream->ReadString();
+        from = read_polymorph(stream);
+        to = read_polymorph(stream);
+        operation_id = stream->ReadUInt16();
+    }
+
+    void InventorySplitOperationDescriptor::read(CSharpByteStream* stream)
+    {
+        item_id = stream->ReadString();
+        from = read_polymorph(stream);
+        to = read_polymorph(stream);
+        count = stream->ReadInt32();
+        operation_id = stream->ReadUInt16();
+    }
+
+    void InventoryMergeOperationDescriptor::read(CSharpByteStream* stream)
+    {
+        item_id = stream->ReadString();
+        item1_id = stream->ReadString();
+        operation_id = stream->ReadUInt16();
+    }
+
+    void InventoryTransferOperationDescriptor::read(CSharpByteStream* stream)
+    {
+        item_id = stream->ReadString();
+        item1_id = stream->ReadString();
+        count = stream->ReadInt32();
+        operation_id = stream->ReadUInt16();
+    }
+
+    void InventorySwapOperationDescriptor::read(CSharpByteStream* stream)
+    {
+        item_id = stream->ReadString();
+        to = read_polymorph(stream);
+        item1_id = stream->ReadString();
+        to1 = read_polymorph(stream);
+        operation_id = stream->ReadUInt16();
+    }
+
+    void InventoryThrowOperationDescriptor::read(CSharpByteStream* stream)
+    {
+        item_id = stream->ReadString();
+        operation_id = stream->ReadUInt16();
+    }
+
+    void InventoryToggleOperationDescriptor::read(CSharpByteStream* stream)
+    {
+        item_id = stream->ReadString();
+        value = stream->ReadBool();
+        operation_id = stream->ReadUInt16();
+    }
+
+    void InventoryFoldOperationDescriptor::read(CSharpByteStream* stream)
+    {
+        item_id = stream->ReadString();
+        value = stream->ReadBool();
+        operation_id = stream->ReadUInt16();
+    }
+
+    void InventoryShotOperationDescriptor::read(CSharpByteStream* stream)
+    {
+        item_id = stream->ReadString();
+        operation_id = stream->ReadUInt16();
+    }
+
+    void SetupItemOperationDescriptor::read(CSharpByteStream* stream)
+    {
+        item_id = stream->ReadString();
+        zone_id = stream->ReadString();
+        position = stream->ReadVector();
+        rotation = stream->ReadQuaternion();
+        setup_time = stream->ReadSingle();
+        operation_id = stream->ReadUInt16();
     }
 
     void ApplyHealthOperationDescriptor::read(CSharpByteStream* stream)

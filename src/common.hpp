@@ -1,7 +1,10 @@
 #pragma once
 
 #include <cstdint>
+#include <mutex>
 #include <vector>
+
+extern std::mutex g_world_lock;
 
 std::vector<uint8_t> decompress_zlib(uint8_t* data, int len);
 

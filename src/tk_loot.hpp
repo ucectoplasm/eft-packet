@@ -24,12 +24,15 @@ namespace tk
         bool lootable;
         Rarity rarity;
         std::string bundle_path;
+        int width;
+        int height;
+        bool overriden;
     };
 
     class LootDatabase
     {
     public:
-        LootDatabase(const char* path);
+        LootDatabase();
         LootItem* query_loot(const std::string& id);
 
     private:
@@ -39,7 +42,7 @@ namespace tk
     struct Polymorph
     {
         virtual ~Polymorph() {}
-        enum Type
+        enum class Type
         {
             FoodDrinkComponentDescriptor = 13,
             ResourceItemComponentDescriptor = 14,
@@ -58,14 +61,34 @@ namespace tk
             KeyComponentDescriptor = 27,
             JsonLootItemDescriptor = 28,
             JsonCorpseDescriptor = 29,
+            InventorySlotItemAddressDescriptor = 32,
+            InventoryStackSlotItemAddress = 33,
+            InventoryContainerDescriptor = 34,
+            InventoryGridItemAddressDescriptor = 35,
+            InventoryOwnerItselfDescriptor = 36,
+            InventoryRemoveOperationDescriptor = 39,
+            InventoryExamineOperationDescriptor = 40,
+            InventoryCheckMagazineOperationDescriptor = 41,
+            InventoryBindItemOperationDescriptor = 42,
+            InventoryMoveOperationDescriptor = 45,
+            InventorySplitOperationDescriptor = 47,
+            InventoryMergeOperationDescriptor = 48,
+            InventoryTransferOperationDescriptor = 49,
+            InventorySwapOperationDescriptor = 50,
+            InventoryThrowOperationDescriptor = 51,
+            InventoryToggleOperationDescriptor = 52,
+            InventoryFoldOperationDescriptor = 53,
+            InventoryShotOperationDescriptor = 54,
+            SetupItemOperationDescriptor = 55,
             ApplyHealthOperationDescriptor = 57,
             OperateStationaryWeaponOperationDescription = 65
         } type;
     };
 
-    std::vector<std::unique_ptr<Polymorph>> read_polymorphs(uint8_t* data, int size);
-
     class CSharpByteStream;
+
+    std::unique_ptr<Polymorph> read_polymorph(CSharpByteStream* stream);
+    std::vector<std::unique_ptr<Polymorph>> read_polymorphs(uint8_t* data, int size);
 
     struct FoodDrinkComponentDescriptor : public Polymorph
     {
@@ -362,6 +385,156 @@ namespace tk
         void read(CSharpByteStream* stream);
     };
 
+    struct InventoryContainerDescriptor : public Polymorph
+    {
+        std::string parent_id; // ParentId = reader.ReadString(),
+        std::string container_id; // ContainerId = reader.ReadString()
+        void read(CSharpByteStream* stream);
+    };
+
+    struct InventorySlotItemAddressDescriptor : public Polymorph
+    {
+        InventoryContainerDescriptor container; // Container = reader.ReadEFTContainerDescriptor()
+        void read(CSharpByteStream* stream);
+    };
+
+    struct InventoryStackSlotItemAddress : public Polymorph
+    {
+        InventoryContainerDescriptor container; // Container = reader.ReadEFTContainerDescriptor()
+        void read(CSharpByteStream* stream);
+    };
+
+    struct InventoryGridItemAddressDescriptor : public Polymorph
+    {
+        LocationInGrid location_in_grid; // LocationInGrid = reader.ReadLocationInGrid(),
+        InventoryContainerDescriptor container; // Container = reader.ReadEFTContainerDescriptor()
+        void read(CSharpByteStream* stream);
+    };
+
+    struct InventoryOwnerItselfDescriptor : public Polymorph
+    {
+        InventoryContainerDescriptor container; // Container = reader.ReadEFTContainerDescriptor()
+        void read(CSharpByteStream* stream);
+    };
+
+    struct InventoryRemoveOperationDescriptor : public Polymorph
+    {
+        std::string item_id; // ItemId = reader.ReadString(),
+        uint16_t operation_id; // OperationId = reader.ReadUInt16()
+        void read(CSharpByteStream* stream);
+    };
+
+    struct InventoryExamineOperationDescriptor : public Polymorph
+    {
+        std::string item_id; // ItemId = reader.ReadString(),
+        uint16_t operation_id; // OperationId = reader.ReadUInt16()
+        void read(CSharpByteStream* stream);
+    };
+
+    struct InventoryCheckMagazineOperationDescriptor : public Polymorph
+    {
+        std::string item_id; // ItemId = reader.ReadString(),
+        bool check_status; // CheckStatus = reader.ReadBoolean(),
+        int skill_level; // SkillLevel = reader.ReadInt32(),
+        uint16_t operation_id; // OperationId = reader.ReadUInt16()
+        void read(CSharpByteStream* stream);
+    };
+
+    struct InventoryBindItemOperationDescriptor : public Polymorph
+    {
+        std::string item_id; // ItemId = reader.ReadString(),
+        int index; // Index = (EBoundItem)reader.ReadInt32(),
+        uint16_t operation_id; // OperationId = reader.ReadUInt16()
+        void read(CSharpByteStream* stream);
+    };
+
+    struct InventoryMoveOperationDescriptor : public Polymorph
+    {
+        std::string item_id; // ItemId = reader.ReadString(),
+        std::unique_ptr<Polymorph> from; // From = reader.ReadPolymorph<GClass908>(),
+        std::unique_ptr<Polymorph> to;// To = reader.ReadPolymorph<GClass908>(),
+        uint16_t operation_id; // OperationId = reader.ReadUInt16()
+        void read(CSharpByteStream* stream);
+    };
+
+    struct InventorySplitOperationDescriptor : public Polymorph
+    {
+        std::string item_id; // ItemId = reader.ReadString(),
+        std::unique_ptr<Polymorph> from; // From = reader.ReadPolymorph<GClass908>(),
+        std::unique_ptr<Polymorph> to; // To = reader.ReadPolymorph<GClass908>(),
+        int count; // Count = reader.ReadInt32(),
+        uint16_t operation_id; // OperationId = reader.ReadUInt16()
+        void read(CSharpByteStream* stream);
+    };
+
+    struct InventoryMergeOperationDescriptor : public Polymorph
+    {
+        std::string item_id; // ItemId = reader.ReadString(),
+        std::string item1_id; // Item1Id = reader.ReadString(),
+        uint16_t operation_id; // OperationId = reader.ReadUInt16()
+        void read(CSharpByteStream* stream);
+    };
+
+    struct InventoryTransferOperationDescriptor : public Polymorph
+    {
+        std::string item_id; // ItemId = reader.ReadString(),
+        std::string item1_id; // Item1Id = reader.ReadString(),
+        int count; // Count = reader.ReadInt32(),
+        uint16_t operation_id; // OperationId = reader.ReadUInt16()
+        void read(CSharpByteStream* stream);
+    };
+
+    struct InventorySwapOperationDescriptor : public Polymorph
+    {
+        std::string item_id; // ItemId = reader.ReadString(),
+        std::unique_ptr<Polymorph> to; // To = reader.ReadPolymorph<GClass908>(),
+        std::string item1_id; // Item1Id = reader.ReadString(),
+        std::unique_ptr<Polymorph> to1; // To1 = reader.ReadPolymorph<GClass908>(),
+        uint16_t operation_id; // OperationId = reader.ReadUInt16()
+        void read(CSharpByteStream* stream);
+    };
+
+    struct InventoryThrowOperationDescriptor : public Polymorph
+    {
+        std::string item_id; // ItemId = reader.ReadString(),
+        uint16_t operation_id; // OperationId = reader.ReadUInt16()
+        void read(CSharpByteStream* stream);
+    };
+
+    struct InventoryToggleOperationDescriptor : public Polymorph
+    {
+        std::string item_id; // ItemId = reader.ReadString(),
+        bool value; // Value = reader.ReadBoolean(),
+        uint16_t operation_id; // OperationId = reader.ReadUInt16()
+        void read(CSharpByteStream* stream);
+    };
+
+    struct InventoryFoldOperationDescriptor : public Polymorph
+    {
+        std::string item_id; // ItemId = reader.ReadString(),
+        bool value; // Value = reader.ReadBoolean(),
+        uint16_t operation_id; // OperationId = reader.ReadUInt16()
+        void read(CSharpByteStream* stream);
+    };
+
+    struct InventoryShotOperationDescriptor : public Polymorph
+    {
+        std::string item_id; // ItemId = reader.ReadString(),
+        uint16_t operation_id; // OperationId = reader.ReadUInt16()
+        void read(CSharpByteStream* stream);
+    };
+
+    struct SetupItemOperationDescriptor : public Polymorph
+    {
+        std::string item_id; // ItemId = reader.ReadString(),
+        std::string zone_id; // ZoneId = reader.ReadString(),
+        Vector3 position; // Position = reader.ReadClassVector3(),
+        Quaternion rotation; // Rotation = reader.ReadClassQuaternion(),
+        float setup_time; // SetupTime = reader.ReadSingle(),
+        uint16_t operation_id; // OperationId = reader.ReadUInt16()
+        void read(CSharpByteStream* stream);
+    };
+
     struct ApplyHealthOperationDescriptor : public Polymorph
     {
         std::string item_id; // ItemId = reader.ReadString(),
@@ -378,8 +551,7 @@ namespace tk
         void read(CSharpByteStream* stream);
     };
 
-    // This basically mirrors the ByteStream, refactor this to merge the two together
-    class CSharpByteStream
+    class CSharpByteStream // too much mirrored with the other stream type...
     {
     public:
         CSharpByteStream(uint8_t* data, int len)

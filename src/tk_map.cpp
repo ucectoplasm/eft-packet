@@ -5,24 +5,20 @@ namespace tk
 {
     Map::Map(Vector3 min, Vector3 max)
         : m_min(min), m_max(max)
-    {
-    }
+    { }
 
     void Map::create_observer(int cid, Observer&& obs)
     {
-        std::lock_guard<std::mutex> lock(m_lock);
         m_observers[cid] = std::move(obs);
     }
 
     void Map::destroy_observer(int cid)
     {
-        std::lock_guard<std::mutex> lock(m_lock);
-
         m_observers.erase(cid);
         m_observers.erase(cid-1);
     }
 
-    Observer* Map::get_observer_manual_lock(int cid)
+    Observer* Map::get_observer(int cid)
     {
         auto entry = m_observers.find(cid);
 
@@ -38,7 +34,7 @@ namespace tk
         return &entry->second;
     }
 
-    std::vector<Observer*> Map::get_observers_manual_lock()
+    std::vector<Observer*> Map::get_observers()
     {
         std::vector<Observer*> ret;
         for (auto& [cid, obs] : m_observers)
@@ -48,7 +44,7 @@ namespace tk
         return ret;
     }
 
-    Observer* Map::get_player_manual_lock()
+    Observer* Map::get_player()
     {
         for (auto& [cid, obs] : m_observers)
         {
@@ -63,27 +59,36 @@ namespace tk
 
     void Map::add_loot_item(LootEntry&& entry)
     {
-        std::lock_guard<std::mutex> lock(m_lock);
-        m_loot.emplace_back(std::move(entry));
+        m_loot[entry.id] = std::move(entry);
     }
 
-    std::vector<LootEntry*> Map::get_loot_manual_lock()
+    std::vector<LootEntry*> Map::get_loot()
     {
         std::vector<LootEntry*> ret;
-        for (auto& entry : m_loot)
+        for (auto& [label, entry] : m_loot)
         {
             ret.emplace_back(&entry);
         }
         return ret;
     }
 
+    void Map::destroy_loot_item_by_id(std::string& id)
+    {
+        m_loot.erase(id);
+    }
+
+    LootEntry* Map::get_loot_by_id(std::string& id)
+    {
+        auto iter = m_loot.find(id);
+        return iter == std::end(m_loot) ? nullptr : &iter->second;
+    }
+
     void Map::add_static_corpse(Vector3 pos)
     {
-        std::lock_guard<std::mutex> lock(m_lock);
         m_static_corpses.emplace_back(std::move(pos));
     }
 
-    std::vector<Vector3*> Map::get_static_corpses_manual_lock()
+    std::vector<Vector3*> Map::get_static_corpses()
     {
         std::vector<Vector3*> ret;
         for (auto& entry : m_static_corpses)
@@ -93,7 +98,7 @@ namespace tk
         return ret;
     }
 
-    TemporaryLoot* Map::get_or_create_temporary_loot_manual_lock(int id)
+    TemporaryLoot* Map::get_or_create_temporary_loot(int id)
     {
         auto entry = m_temporary_loot.find(id);
         if (entry == std::end(m_temporary_loot))
@@ -103,7 +108,7 @@ namespace tk
         return &m_temporary_loot[id];
     }
 
-    std::vector<TemporaryLoot*> Map::get_temporary_loots_manual_lock()
+    std::vector<TemporaryLoot*> Map::get_temporary_loots()
     {
         std::vector<TemporaryLoot*> ret;
         for (auto& [id, loot] : m_temporary_loot)
@@ -111,15 +116,5 @@ namespace tk
             ret.push_back(&loot);
         }
         return ret;
-    }
-
-    void Map::lock()
-    {
-        m_lock.lock();
-    }
-
-    void Map::unlock()
-    {
-        m_lock.unlock();
     }
 }

@@ -4,6 +4,8 @@
 #include "miniz/miniz.h"
 #include "glm/gtx/euler_angles.hpp"
 
+std::mutex g_world_lock;
+
 std::vector<uint8_t> decompress_zlib(uint8_t* data, int len)
 {
     std::vector<uint8_t> ret;

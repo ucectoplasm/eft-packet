@@ -28,26 +28,6 @@ namespace tk
         GameUpdate = 170,
     };
 
-    static std::string to_string(PacketCode code)
-    {
-        switch (code)
-        {
-        case ServerInit: return "ServerInit";
-        case WorldSpawn: return "WorldSpawn";
-        case WorldUnspawn: return "WorldUnspawn";
-        case SubworldSpawn: return "SubworldSpawn";
-        case SubworldUnspawn: return "SubworldUnspawn";
-        case PlayerSpawn: return "PlayerSpawn";
-        case PlayerUnspawn: return "PlayerUnspawn";
-        case ObserverSpawn: return "ObserverSpawn";
-        case ObserverUnspawn: return "ObserverUnspawn";
-        case BattleEye: return "BattleEye";
-        case GameUpdate: return "GameUpdate";
-        }
-
-        return "Unknown (" + std::to_string((int)code) + ")";
-    }
-
     static uint32_t Popcount(uint32_t x)
     {
         uint32_t num = x - (x >> 1 & 1431655765U);
@@ -87,6 +67,7 @@ namespace tk
     {
         return integerValue / (float)maxIntegerValue * delta + min;
     }
+
 
     struct FloatQuantizer // copied from c# decompile
     {
@@ -188,6 +169,54 @@ namespace tk
             uint32_t result = (uint32_t)(_scratch >> 32);
             _scratch &= uint32_t(~0u);
             return result;
+        }
+
+        std::vector<std::uint8_t> ReadBytes(int bytesCount)
+        {
+            std::vector<std::uint8_t> ret;
+            ret.resize(bytesCount);
+
+            if (_isVirgin)
+            {
+                _scratch = (uint64_t)(*_data);
+                _isVirgin = false;
+            }
+            if (_bitsRead + bytesCount * 8 > _bitsCount)
+            {
+                std::memset(ret.data(), 0, bytesCount);
+                _isOverflow = true;
+                return ret;
+            }
+            int num = (4 - _bitIndex / 8) % 4;
+            if (num > bytesCount)
+            {
+                num = bytesCount;
+            }
+            for (int i = 0; i < num; i++)
+            {
+                ret[i] = ReadBits(8);
+            }
+            if (num == bytesCount)
+            {
+                return ret;
+            }
+            int num2 = (bytesCount - num) / 4;
+            if (num2 > 0)
+            {
+                int length = num2 * 4;
+                int sourceIndex = _wordIndex * 4;
+                memcpy(ret.data() + num, ((uint8_t*)_data) + sourceIndex, length);
+                _bitsRead += num2 * 32;
+                _wordIndex += num2;
+                _scratch = (uint64_t)_data[_wordIndex];
+            }
+            int num3 = num + num2 * 4;
+            int num4 = bytesCount - num3;
+            for (int j = 0; j < num4; j++)
+            {
+                ret[num3 + j] = ReadBits(8);
+            }
+            return ret;
         }
 
         int GetAlignBits()
@@ -341,6 +370,18 @@ namespace tk
         bool Overflow()
         {
             return false;
+        }
+
+        std::vector<std::uint8_t> ReadBytes(int len)
+        {
+            m_buffer.ReadAlign();
+            return m_buffer.ReadBytes(len);
+        }
+
+        std::vector<std::uint8_t> ReadBytesAlloc()
+        {
+            uint16_t len = ReadUInt16();
+            return ReadBytes(len);
         }
 
     private:

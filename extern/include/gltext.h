@@ -482,12 +482,20 @@ GLT_API void gltDrawText3D(GLTtext *text, GLfloat x, GLfloat y, GLfloat z, GLflo
 		x, y + (GLfloat)_gltFontGlyphHeight * scale, z, 1.0f,
 	};
 
+	GLfloat mv[16];
+	_gltMat4Mult(view, model, mv);
+
+	mv[0] = -scale;
+	mv[1] = 0.0;
+	mv[2] = 0.0;
+	mv[4] = 0.0;
+	mv[5] = -scale;
+	mv[6] = 0.0;
+
 	GLfloat mvp[16];
-	GLfloat vp[16];
+	_gltMat4Mult(projection, mv, mvp);
 
-	_gltMat4Mult(projection, view, vp);
-	_gltMat4Mult(vp, model, mvp);
-
+	glUniform1f(glGetUniformLocation(_gltText2DShader, "width"), gltGetTextWidth(text, scale));
 	_gltDrawText();
 }
 
@@ -836,6 +844,7 @@ static const GLchar* _gltText2DVertexShaderSource =
 "in vec2 texCoord;\n"
 "\n"
 "uniform mat4 mvp;\n"
+"uniform float width;\n"
 "\n"
 "out vec2 fTexCoord;\n"
 "\n"
@@ -844,6 +853,7 @@ static const GLchar* _gltText2DVertexShaderSource =
 "	fTexCoord = texCoord;\n"
 "	\n"
 "	gl_Position = mvp * vec4(position, 0.0, 1.0);\n"
+"	gl_Position.x -= width / 2.0f;\n"
 "}\n";
 
 static const GLchar* _gltText2DFragmentShaderSource =

@@ -1,4 +1,5 @@
 #include "tk_net.hpp"
+
 #include "tk.hpp"
 #include "tk_loot.hpp"
 #include "tk_map.hpp"
@@ -96,6 +97,8 @@ namespace tk
             // GClass806.SetupPositionQuantizer(@class.response.bounds_0);
             auto bound_min = stream->ReadVector3();
             auto bound_max = stream->ReadVector3();
+
+            std::lock_guard<std::mutex> lock(g_world_lock);
             g_state->map = std::make_unique<Map>(bound_min, bound_max);
         }
 
@@ -111,10 +114,14 @@ namespace tk
         LootItem* data = g_state->loot_db->query_loot(desc->template_id);
 
         LootEntry entry;
+        entry.id = desc->id;
         entry.name = data ? data->name : desc->template_id;
-        entry.value = data ? data->value : 0;
+        entry.value = data ? (data->value * desc->stack_count) : 0;
+        entry.value_per_slot = data ? (entry.value / (data->width * data->height)) : 0;
         entry.rarity = data ? data->rarity : LootItem::Rarity::NotExist;
         entry.bundle_path = data ? data->bundle_path : "";
+        entry.overriden = data ? data->overriden : false;
+        entry.unknown = data == nullptr;
         entries->emplace_back(std::move(entry));
 
         for (const auto& grid : desc->grids)
@@ -136,16 +143,19 @@ namespace tk
         auto loot_json_comp = stream->ReadBytesAndSize();
         auto loot_info_comp = stream->ReadBytesAndSize();
         auto loot_not_json = decompress_zlib(loot_json_comp.data(), (int)loot_json_comp.size());
+
         std::vector<std::unique_ptr<Polymorph>> morphs = read_polymorphs(loot_not_json.data(), (int)loot_not_json.size());
 
         for (std::unique_ptr<Polymorph>& morph : morphs)
         {
-            if (morph->type == Polymorph::JsonLootItemDescriptor)
+            if (morph->type == Polymorph::Type::JsonLootItemDescriptor)
             {
                 JsonLootItemDescriptor* desc = (JsonLootItemDescriptor*)morph.get();
 
                 std::vector<LootEntry> free_loot;
                 recursive_add_items(&desc->item, &free_loot);
+
+                std::lock_guard<std::mutex> lock(g_world_lock);
 
                 for (LootEntry& entry : free_loot)
                 {
@@ -153,8 +163,9 @@ namespace tk
                     g_state->map->add_loot_item(std::move(entry));
                 }
             }
-            else if (morph->type == Polymorph::JsonCorpseDescriptor)
+            else if (morph->type == Polymorph::Type::JsonCorpseDescriptor)
             {
+                std::lock_guard<std::mutex> lock(g_world_lock);
                 JsonCorpseDescriptor* desc = (JsonCorpseDescriptor*)morph.get();
                 g_state->map->add_static_corpse(desc->position);
             }
@@ -182,7 +193,8 @@ namespace tk
 
             for (SlotDescriptor& slot : equipment.slots)
             {
-                if (slot.id == "TacticalVest" || slot.id == "Backpack" || slot.id == "Pockets")
+                // TODO: Should add scabbard if this is a scav. Some NPCs can drop RRs.
+                if (slot.id != "Scabbard" && slot.id != "SecuredContainer")
                 {
                     recursive_add_items(slot.contained_item.get(), &obs.inventory);
                 }
@@ -243,6 +255,8 @@ namespace tk
         obs.pid = pid;
         obs.cid = cid;
         obs.type = Observer::Self;
+
+        std::lock_guard<std::mutex> lock(g_world_lock);
         g_state->map->create_observer(obs.cid, std::move(obs));
     }
 
@@ -257,6 +271,8 @@ namespace tk
         Observer obs = deserialize_initial_state(stream);
         obs.pid = pid;
         obs.cid = cid;
+
+        std::lock_guard<std::mutex> lock(g_world_lock);
         g_state->map->create_observer(obs.cid, std::move(obs));
     }
 
@@ -265,9 +281,8 @@ namespace tk
         auto pid = stream->ReadInt32();
         auto cid = stream->ReadByte();
 
-        g_state->map->lock();
-        g_state->map->get_observer_manual_lock(cid)->is_unspawned = true;
-        g_state->map->unlock();
+        std::lock_guard<std::mutex> lock(g_world_lock);
+        g_state->map->get_observer(cid)->is_unspawned = true;
     }
 
     void update_position(BitStream& bstream, tk::Observer* obs)
@@ -318,131 +333,201 @@ namespace tk
         }
     }
 
+    void skip_misc_stuff(BitStream& bstream)
+    {
+        if (bstream.ReadBool())
+        {
+            bstream.ReadUInt8();
+        }
+
+        if (bstream.ReadBool())
+        {
+            bstream.ReadLimitedInt32(0, 31);
+        }
+
+        if (bstream.ReadBool())
+        {
+            bstream.ReadLimitedInt32(0, 63);
+        }
+
+        if (bstream.ReadBool())
+        {
+            bstream.ReadLimitedInt32(0, 8);
+        }
+
+        if (bstream.ReadBool())
+        {
+            bstream.ReadLimitedFloat(0.0f, 1.0f, 0.0078125f);
+        }
+
+        if (bstream.ReadBool())
+        {
+            bstream.ReadLimitedFloat(0.0f, 1.0f, 0.0078125f);
+        }
+
+        if (bstream.ReadBool())
+        {
+            bstream.ReadLimitedFloat(-5.0f, 5.0f, 0.0078125f);
+        }
+
+        if (bstream.ReadBool())
+        {
+            if (!bstream.ReadBool())
+            {
+                bstream.ReadBool();
+            }
+        }
+
+        bstream.ReadLimitedInt32(-1, 1);
+        bstream.ReadBool();
+
+        if (!bstream.ReadBool())
+        {
+            bstream.ReadLimitedFloat(-50.0f, 50.0f, 0.0625f);
+            bstream.ReadLimitedFloat(-50.0f, 50.0f, 0.0625f);
+        }
+
+        bstream.ReadBool();
+        bstream.ReadBool();
+        bstream.ReadBool();
+
+        if (bstream.ReadBool())
+        {
+            if (bstream.ReadBool()) // InteractWithDoorPacket
+            {
+                if (bstream.ReadBool())
+                {
+                    auto type = bstream.ReadLimitedInt32(0, 4);
+                    bstream.ReadString(1350);
+                    bstream.ReadLimitedInt32(0, 2);
+                    if (type == 2)
+                    {
+                        bstream.ReadLimitedString(L' ', L'z');
+                    }
+                }
+            }
+            if (bstream.ReadBool()) // LootInteractionPacket
+            {
+                if (bstream.ReadBool())
+                {
+                    std::wstring loot_id = bstream.ReadString(1350);
+                    uint32_t callback_id = bstream.ReadUInt32();
+                }
+            }
+            if (bstream.ReadBool()) // StationaryWeaponPacket
+            {
+                if (bstream.ReadBool())
+                {
+                    auto type = bstream.ReadUInt8();
+                    if (type == 0)
+                    {
+                        bstream.ReadString(1350);
+                    }
+                }
+            }
+            if (bstream.ReadBool()) // PlantItemPacket
+            {
+                if (bstream.ReadBool())
+                {
+                    bstream.ReadString(1350);
+                    bstream.ReadString(1350);
+                }
+            }
+        }
+
+        if (!bstream.ReadBool())
+        {
+            int optype = bstream.ReadLimitedInt32(0, 10);
+            bstream.ReadLimitedString(L' ', L'z');
+            bstream.ReadLimitedInt32(0, 2047);
+            if (optype == 6) // CreateMeds
+            {
+                bstream.ReadLimitedInt32(0, 7);
+                bstream.ReadFloat();
+            }
+            bstream.ReadLimitedInt32(-1, 3);
+        }
+    }
+
+    void update_loot(BitStream& bstream, tk::Observer* obs, bool outbound)
+    {
+        auto read_operation = [&]()
+        {
+            if (bstream.ReadBool())
+            {
+                auto data = bstream.ReadBytesAlloc();
+                int callback = bstream.ReadLimitedInt32(0, 2047);
+                int hash = bstream.ReadInt32();
+
+                CSharpByteStream cstream(data.data(), (int)data.size());
+                std::unique_ptr<Polymorph> polymorph = read_polymorph(&cstream);
+
+                if (polymorph->type == Polymorph::Type::InventoryMoveOperationDescriptor)
+                {
+                    InventoryMoveOperationDescriptor* desc = (InventoryMoveOperationDescriptor*)polymorph.get();
+                    // TODO: Loot refactor
+                    // This should move the object around, not destroy it. Destroying it allows us to hide it in the short term.
+                    //if (desc->from->type == Polymorph::Type::InventoryOwnerItselfDescriptor)
+                    {
+                        tk::g_state->map->destroy_loot_item_by_id(desc->item_id);
+                    }
+                }
+            }
+        };
+
+        int num = bstream.ReadUInt8();
+        for (int i = 0; i < num; ++i)
+        {
+            if (outbound)
+            {
+                read_operation();
+            }
+            else
+            {
+                int tag = bstream.ReadUInt8();
+                if (tag == 1) // command
+                {
+                    read_operation();
+                    continue;
+                }
+
+                auto id = bstream.ReadUInt16();
+                int status = bstream.ReadLimitedInt32(0, 3);
+                if (status == 2)
+                {
+                    bstream.ReadLimitedString(L' ', L'\u007f');
+                }
+                if (bstream.ReadBool())
+                {
+                    bstream.ReadInt32();
+                    bstream.ReadBool();
+                }
+            }
+
+        }
+    }
+
     void update_network_player(BitStream& bstream, int channel)
     {
-        g_state->map->lock();
+        std::lock_guard<std::mutex> lock(g_world_lock);
 
-        Observer* obs = g_state->map->get_observer_manual_lock(channel);
+        Observer* obs = g_state->map->get_observer(channel);
 
         if (!obs)
         {
-            // sometimes we don't receive the observerspawn...
-            g_state->map->unlock();
+            // I suspect this is caused by receiving game updates for observers before we receive the spawn message.
+            // This leads to "phantom observers".
+            // Fixing this will require us to understand unet acks in more detail and deliver messages on ordered channels strictly in-order.
             Observer new_obs;
             new_obs.pid = -1;
             new_obs.cid = channel;
             new_obs.type = Observer::ObserverType::Player;
-            new_obs.name = "UNKNOWN";
+            new_obs.name = "UNKNOWN?!";
             g_state->map->create_observer(channel, std::move(new_obs));
-            g_state->map->lock();
-
-            obs = g_state->map->get_observer_manual_lock(channel);
+            obs = g_state->map->get_observer(channel);
         }
 
-        if (obs->type == Observer::Self)
-        {
-            // ClientPlayer::OnDeserializeFromServer(byte channelId, IBitReaderStream reader, int rtt)
-            // -> this->method_85(reader);
-
-            if (false) // This code path is unused right now
-            {
-                if (bstream.ReadBool())
-                {
-                    bstream.ReadUInt16();
-                    bstream.ReadLimitedInt32(0, 512);
-                    bstream.ReadLimitedInt32(0, 512);
-                }
-
-                auto flag = bstream.ReadBool();
-                auto flag2 = bstream.ReadBool();
-                auto flag3 = bstream.ReadBool();
-                auto flag4 = bstream.ReadBool();
-                if (flag)
-                {
-                    auto num = bstream.ReadLimitedInt32(1, 16);
-                    for (int i = 0; i < num; i++)
-                    {
-                        auto bodypart = bstream.ReadLimitedInt32(0, 8); // EBodyPart
-                        auto dmgtype = bstream.ReadLimitedInt32(1, 512);
-                        auto dmg = bstream.ReadFloat();
-                    }
-                }
-                if (flag2)
-                {
-                    auto num2 = bstream.ReadLimitedInt32(1, 16);
-                    for (int j = 0; j < num2; j++)
-                    {
-                        auto id = bstream.ReadLimitedString(L' ', L'z');
-                        auto durability = bstream.ReadLimitedFloat(0.f, 100.f, 0.1f);
-                    }
-                }
-                if (flag3)
-                {
-                    auto num3 = bstream.ReadLimitedInt32(1, 16);
-                    for (int k = 0; k < num3; k++)
-                    {
-                        auto dmg = bstream.ReadLimitedInt32(0, 255);
-                        auto absorbed = bstream.ReadLimitedInt32(0, 127);
-                        auto part = bstream.ReadLimitedInt32(0, 8);
-                        auto special = bstream.ReadLimitedInt32(0, 4);
-                        auto stamloss = bstream.ReadLimitedInt32(0, 255);
-                    }
-                }
-                if (flag4)
-                {
-                    auto num4 = bstream.ReadLimitedInt32(1, 32);
-                    for (int l = 0; l < num4; l++)
-                    {
-                        auto id = bstream.ReadUInt16();
-                        auto status = bstream.ReadLimitedInt32(0, 3);
-                        if (status == 2)
-                        {
-                            auto err = bstream.ReadLimitedString(L' ', L'\u007f');
-                        }
-                        if (bstream.ReadBool())
-                        {
-                            bstream.ReadInt32();
-                            bstream.ReadBool();
-                        }
-                    }
-                }
-
-                if (bstream.ReadBool())
-                {
-                    while (bstream.ReadBool()) // StartSearchingActionPacket
-                    {
-                        bstream.ReadString();
-                    }
-
-                    while (bstream.ReadBool()) // StopSearchingActionPacket
-                    {
-                        bstream.ReadString();
-                    }
-
-                    while (bstream.ReadBool()) // UpdateAccessStatusPacket
-                    {
-                        bstream.ReadString();
-                        bstream.ReadUInt8();
-                    }
-
-                    while (bstream.ReadBool()) // SetSearchedPacket
-                    {
-                        bstream.ReadString();
-                        bstream.ReadString();
-                        bstream.ReadString();
-                        bstream.ReadBool();
-                    }
-
-                    bstream.ReadBool(); // StopSearchingPacket
-
-                    if (bstream.ReadBool()) // SyncPositionPacket
-                    {
-                        auto vec = bstream.ReadVector3();
-                    }
-                }
-            }
-        }
-        else
+        if (obs->type != Observer::Self)
         {
             // ObservedPlayer::OnDeserializeFromServer(byte channelId, IBitReaderStream reader, int rtt)
             // void ObservedPlayer.GInterface89.Receive(IBitReaderStream reader, GClass656 destinationFramesInfoQueue)
@@ -453,16 +538,16 @@ namespace tk
 
             if (!bstream.ReadBool())
             {
-                g_state->map->get_observer_manual_lock(channel)->is_dead = true;
+                g_state->map->get_observer(channel)->is_dead = true;
             }
             else
             {
                 update_position(bstream, obs);
                 update_rotation(bstream, obs);
+                skip_misc_stuff(bstream);
+                update_loot(bstream, obs, false);
             }
         }
-
-        g_state->map->unlock();
     }
 
     void update_network_world(BitStream& bstream, int channel)
@@ -494,8 +579,8 @@ namespace tk
             {
                 auto id = bstream.ReadInt32();
 
-                g_state->map->lock();
-                TemporaryLoot* loot = g_state->map->get_or_create_temporary_loot_manual_lock(id);
+                std::lock_guard<std::mutex> lock(g_world_lock);
+                TemporaryLoot* loot = g_state->map->get_or_create_temporary_loot(id);
 
                 if (bstream.ReadBool())
                 {
@@ -517,8 +602,6 @@ namespace tk
                     loot->pos.y = bstream.ReadQuantizedFloat(&quant._yFloatQuantizer);
                     loot->pos.z = bstream.ReadQuantizedFloat(&quant._zFloatQuantizer);
                 }
-
-                g_state->map->unlock();
             }
         }
     }
@@ -550,15 +633,18 @@ namespace tk
         for (int i = 0; i < num; ++i)
         {
             auto rtt = bstream.ReadBool() ? bstream.ReadUInt16() : 0;
-            auto dt = bstream.ReadLimitedFloat(0.0f, 1.0f, 0.0009765625f);
+            auto dt = bstream.ReadLimitedFloat(0, 1, 0.0009765625);
             auto frame = bstream.ReadLimitedInt32(0, 2097151);
-            auto frame_2 = bstream.ReadBool() ? bstream.ReadLimitedInt32(0, 2097151) : bstream.ReadLimitedInt32(0, 15);
+            auto frame_2 = bstream.ReadBool()
+                ? bstream.ReadLimitedInt32(0, 2097151)
+                : bstream.ReadLimitedInt32(0, 15);
 
-            g_state->map->lock();
-            tk::Observer* player = g_state->map->get_observer_manual_lock(channel);
+            std::lock_guard<std::mutex> lock(g_world_lock);
+            tk::Observer* player = g_state->map->get_observer(channel);
             update_position(bstream, player);
             update_rotation(bstream, player);
-            g_state->map->unlock();
+            skip_misc_stuff(bstream);
+            update_loot(bstream, player, true);
         }
     }
 }
