@@ -144,6 +144,10 @@ int SDL_main(int argc, char* argv[])
                 }
 
                 pcpp::UdpLayer* udp = parsed.getLayerOfType<pcpp::UdpLayer>();
+                if (udp == NULL) {
+                    return;
+                }
+
                 int len = udp->getDataLen() - udp->getHeaderLen();
                 uint8_t* data_start = udp->getDataPtr(udp->getHeaderLen());
 
@@ -332,6 +336,10 @@ void do_net(std::vector<Packet> work, const char* packet_dump_path)
                 uint8_t* user_data = (uint8_t*)messageExtractor.GetMessageStart();
                 int user_len = messageExtractor.GetMessageLength();
                 int channel = messageExtractor.GetChannelId();
+
+                if (user_len <= sizeof(UNET::NetMessageFragmentedHeader)) {
+                    continue;
+                }
 
                 if (channel == 0 || channel == 1 || channel == 2) // ReliableFragmented
                 {
