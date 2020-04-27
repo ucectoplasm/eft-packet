@@ -1,601 +1,655 @@
+#include "tk_net.hpp"
+
+#include "tk.hpp"
 #include "tk_loot.hpp"
+#include "tk_map.hpp"
 #include "json11.hpp"
-#include <cassert>
+
+#include <unordered_map>
 
 namespace tk
 {
-    LootDatabase::LootDatabase()
+    void process_server_init(ByteStream* stream);
+    void process_world_spawn(ByteStream* stream);
+    void process_world_unspawn(ByteStream* stream);
+    void process_subworld_spawn(ByteStream* stream);
+    void process_subworld_unspawn(ByteStream* stream);
+    void process_player_spawn(ByteStream* stream);
+    void process_player_unspawn(ByteStream* stream);
+    void process_observer_spawn(ByteStream* stream);
+    void process_observer_unspawn(ByteStream* stream);
+    void process_game_update(ByteStream* stream, int channel);
+    void process_game_update_outbound(ByteStream* stream, int channel);
+
+    void process_packet(ByteStream* stream, uint8_t channel, bool outbound)
     {
-        auto load_file_as_json = [](const char* path) -> json11::Json
+        uint16_t head = 0;
+
+        while (head < stream->len())
         {
-            FILE* file = fopen(path, "rb");
+            uint16_t len = stream->ReadUInt16();
+            PacketCode packet = (PacketCode)stream->ReadInt16();
 
-            json11::Json json;
-
-            if (file)
+            if (outbound)
             {
-                fseek(file, 0, SEEK_END);
-                int len = ftell(file);
-                fseek(file, 0, SEEK_SET);
-
-                std::vector<char> data;
-                data.resize(len + 1);
-                fread(data.data(), 1, len, file);
-                data[data.size() - 1] = '\0';
-
-                fclose(file);
-
-                std::string err;
-                json = json11::Json::parse(data.data(), err, json11::COMMENTS);
+                // Only care about 170 for outbound local player updates.
+                if (packet == PacketCode::GameUpdate)
+                {
+                    process_game_update_outbound(stream, channel);
+                }
+            }
+            else
+            {
+                switch (packet)
+                {
+                case PacketCode::ServerInit: process_server_init(stream); break;
+                case PacketCode::WorldSpawn: process_world_spawn(stream); break;
+                case PacketCode::WorldUnspawn: process_world_unspawn(stream); break;
+                case PacketCode::SubworldSpawn: process_subworld_spawn(stream); break;
+                case PacketCode::SubworldUnspawn: process_subworld_unspawn(stream); break;
+                case PacketCode::PlayerSpawn: process_player_spawn(stream); break;
+                case PacketCode::PlayerUnspawn: process_player_unspawn(stream); break;
+                case PacketCode::ObserverSpawn: process_observer_spawn(stream); break;
+                case PacketCode::ObserverUnspawn: process_observer_unspawn(stream); break;
+                case PacketCode::BattleEye: break; // ignored
+                case PacketCode::GameUpdate: process_game_update(stream, channel); break;
+                default: break; // unhandled
+                }
             }
 
-            return json;
+            head += len + 4;
+            stream->seek(head);
+        }
+    }
+
+    void process_server_init(ByteStream* stream)
+    {
+        auto unk0 = stream->ReadByte();
+        auto realDateTime = stream->ReadBool() ? 0 : stream->ReadInt64();
+        auto gameDateTime = stream->ReadInt64();
+        auto timeFactor = stream->ReadSingle();
+
+        {
+            // ASSET BUNDLES TO LOAD?
+            // json
+            auto unk1 = stream->ReadBytesAndSize();
+        }
+
+        {
+            // WEATHER?
+            // json
+            auto unk2 = stream->ReadBytesAndSize();
+        }
+        
+        {
+            // json
+            auto unk3 = stream->ReadBytesAndSize();
+        }
+
+        auto unk4 = stream->ReadBool();
+        auto member_type = stream->ReadInt32(); // see EMemberCategory
+        auto unk5 = stream->ReadSingle(); // dt?
+
+        {
+            // List of lootables? (no locations yet)
+            // json
+            auto unk6 = stream->ReadBytesAndSize();
+        }
+
+        auto unk7 = stream->ReadBytesAndSize();
+
+        {
+            // GClass806.SetupPositionQuantizer(@class.response.bounds_0);
+            auto bound_min = stream->ReadVector3();
+            auto bound_max = stream->ReadVector3();
+
+            std::lock_guard<std::mutex> lock(g_world_lock);
+            g_state->map = std::make_unique<Map>(bound_min, bound_max);
+        }
+
+        auto unk8 = stream->ReadUInt16();
+        auto unk9 = stream->ReadByte();
+    }
+
+    void process_world_spawn(ByteStream* stream) { }
+    void process_world_unspawn(ByteStream* stream) { }
+
+    void recursive_add_items(ItemDescriptor* desc, std::vector<LootEntry>* entries)
+    {
+        LootItem* data = g_state->loot_db->query_loot(desc->template_id);
+
+        LootEntry entry;
+        entry.id = desc->id;
+        entry.name = data ? data->name : desc->template_id;
+        entry.value = data ? (data->value * desc->stack_count) : 0;
+        entry.value_per_slot = data ? (entry.value / (data->width * data->height)) : 0;
+        entry.rarity = data ? data->rarity : LootItem::Rarity::NotExist;
+        entry.bundle_path = data ? data->bundle_path : "";
+        entry.overriden = data ? data->overriden : false;
+        entry.unknown = data == nullptr;
+        entries->emplace_back(std::move(entry));
+
+        for (const auto& grid : desc->grids)
+        {
+            for (const auto& item_in_grid : grid.items)
+            {
+                recursive_add_items(item_in_grid.item.get(), entries);
+            }
+        }
+    }
+
+    void process_subworld_spawn(ByteStream* stream)
+    {
+        if (!stream->ReadBool())
+        {
+            return;
+        }
+
+        auto loot_json_comp = stream->ReadBytesAndSize();
+        auto loot_info_comp = stream->ReadBytesAndSize();
+        auto loot_not_json = decompress_zlib(loot_json_comp.data(), (int)loot_json_comp.size());
+
+        std::vector<std::unique_ptr<Polymorph>> morphs = read_polymorphs(loot_not_json.data(), (int)loot_not_json.size());
+
+        for (std::unique_ptr<Polymorph>& morph : morphs)
+        {
+            if (morph->type == Polymorph::Type::JsonLootItemDescriptor)
+            {
+                JsonLootItemDescriptor* desc = (JsonLootItemDescriptor*)morph.get();
+
+                std::vector<LootEntry> free_loot;
+                recursive_add_items(&desc->item, &free_loot);
+
+                std::lock_guard<std::mutex> lock(g_world_lock);
+
+                for (LootEntry& entry : free_loot)
+                {
+                    entry.pos = desc->position;
+                    g_state->map->add_loot_item(std::move(entry));
+                }
+            }
+            else if (morph->type == Polymorph::Type::JsonCorpseDescriptor)
+            {
+                std::lock_guard<std::mutex> lock(g_world_lock);
+                JsonCorpseDescriptor* desc = (JsonCorpseDescriptor*)morph.get();
+                g_state->map->add_static_corpse(desc->position);
+            }
+        }
+    }
+
+    Observer deserialize_initial_state(ByteStream* stream)
+    {
+        // now see async Task method_92(NetworkReader reader)
+        auto unk2 = stream->ReadByte();
+        auto unk3 = stream->ReadBool();
+        auto pos = stream->ReadVector3();
+        auto rot = stream->ReadQuaternion();
+        auto in_prone = stream->ReadBool();
+        auto pose_level = stream->ReadSingle();
+
+        Observer obs;
+
+        {
+            auto inventory_data = stream->ReadBytesAndSize();
+            CSharpByteStream cstream(inventory_data.data(), (int)inventory_data.size());
+
+            ItemDescriptor equipment;
+            equipment.read(&cstream);
+
+            for (SlotDescriptor& slot : equipment.slots)
+            {
+                // TODO: Should add scabbard if this is a scav. Some NPCs can drop RRs.
+                if (slot.id != "Scabbard" && slot.id != "SecuredContainer")
+                {
+                    recursive_add_items(slot.contained_item.get(), &obs.inventory);
+                }
+            }
+        }
+
+        {
+            auto profile_zip = stream->ReadBytesAndSize();
+            auto profile_zip_data = decompress_zlib(profile_zip.data(), (int)profile_zip.size());
+
+            std::string err;
+            auto json = json11::Json::parse((char*)profile_zip_data.data(), err);
+
+            auto id = json["_id"].string_value();
+            auto info_name = json["Info"]["Nickname"].string_value();
+            auto info_level = json["Info"]["Level"].int_value();
+            auto info_side = json["Info"]["Side"].string_value();
+            auto info_group_id = json["Info"]["GroupId"].string_value();
+            auto info_role = json["Info"]["Settings"]["Role"].string_value();
+
+            bool is_scav = info_side == "Savage";
+
+            if (is_scav)
+            {
+                info_name = "Scav";
+                info_name += info_role;
+            }
+
+            obs.type = is_scav ? Observer::Scav : Observer::Player;
+            obs.is_npc = is_scav && info_level == 1;
+            obs.id = id;
+            obs.group_id = info_group_id;
+            obs.name = info_name;
+            obs.level = info_level;
+            obs.pos = pos;
+            obs.rot = to_euler(rot);
+        }
+
+        {
+            // can find out what gear is in their pockets (I think)
+            // json
+            auto search_info = stream->ReadBytesAndSize();
+        }
+
+        // more stuff depending on flags to determine weapons, quickslots, etc...
+        return obs;
+    }
+
+    void process_subworld_unspawn(ByteStream* stream) { }
+
+    void process_player_spawn(ByteStream* stream)
+    {
+        auto pid = stream->ReadInt32();
+        auto cid = stream->ReadByte();
+        auto pos = stream->ReadVector3();
+
+        Observer obs = deserialize_initial_state(stream);
+        obs.pid = pid;
+        obs.cid = cid;
+        obs.type = Observer::Self;
+
+        std::lock_guard<std::mutex> lock(g_world_lock);
+        g_state->map->create_observer(obs.cid, std::move(obs));
+    }
+
+    void process_player_unspawn(ByteStream* stream) { }
+
+    void process_observer_spawn(ByteStream* stream)
+    {
+        auto pid = stream->ReadInt32();
+        auto cid = stream->ReadByte();
+        auto pos = stream->ReadVector3();
+
+        Observer obs = deserialize_initial_state(stream);
+        obs.pid = pid;
+        obs.cid = cid;
+
+        std::lock_guard<std::mutex> lock(g_world_lock);
+        g_state->map->create_observer(obs.cid, std::move(obs));
+    }
+
+    void process_observer_unspawn(ByteStream* stream)
+    {
+        auto pid = stream->ReadInt32();
+        auto cid = stream->ReadByte();
+
+        std::lock_guard<std::mutex> lock(g_world_lock);
+        g_state->map->get_observer(cid)->is_unspawned = true;
+    }
+
+    void update_position(BitStream& bstream, tk::Observer* obs)
+    {
+        // static Vector3 smethod_3(IBitReaderStream reader, Vector3 prevPosition)
+        obs->last_pos = obs->pos;
+
+        Vector3 new_pos = obs->pos;
+
+        bool read = bstream.ReadBool();
+        bool partial_read;
+
+        if (read) // vector.sqrMagnitude > 9.536743E-07f;
+        {
+            partial_read = bstream.ReadBool();
+            if (partial_read) // vector.AllAbsComponentsLessThen(1f);
+            {
+                Vector3Quantizer quant(-1.0f, 1.f, 0.001953125f, -1.f, 1.f, 0.0009765625f, -1.f, 1.f, 0.001953125f, false);
+
+                new_pos.x += bstream.ReadQuantizedFloat(&quant._xFloatQuantizer);
+                new_pos.y += bstream.ReadQuantizedFloat(&quant._yFloatQuantizer);
+                new_pos.z += bstream.ReadQuantizedFloat(&quant._zFloatQuantizer);
+            }
+            else
+            {
+                Vector3Quantizer quant(
+                    g_state->map->bounds_min().x, g_state->map->bounds_max().x, 0.001953125f,
+                    g_state->map->bounds_min().y, g_state->map->bounds_max().y, 0.0009765625f,
+                    g_state->map->bounds_min().z, g_state->map->bounds_max().z, 0.001953125f,
+                    true);
+
+                new_pos.x = bstream.ReadQuantizedFloat(&quant._xFloatQuantizer);
+                new_pos.y = bstream.ReadQuantizedFloat(&quant._yFloatQuantizer);
+                new_pos.z = bstream.ReadQuantizedFloat(&quant._zFloatQuantizer);
+            }
+        }
+
+        obs->pos = new_pos;
+    }
+
+    void update_rotation(BitStream& bstream, tk::Observer* obs)
+    {
+        if (bstream.ReadBool())
+        {
+            Vector2Quantizer quant(0.0f, 360.0f, 0.015625f, -90.0f, 90.0f, 0.015625f);
+            obs->rot.x = bstream.ReadQuantizedFloat(&quant._xFloatQuantizer);
+            obs->rot.y = bstream.ReadQuantizedFloat(&quant._yFloatQuantizer);
+        }
+    }
+
+    void skip_misc_stuff(BitStream& bstream)
+    {
+        if (bstream.ReadBool())
+        {
+            bstream.ReadUInt8();
+        }
+
+        if (bstream.ReadBool())
+        {
+            bstream.ReadLimitedInt32(0, 31);
+        }
+
+        if (bstream.ReadBool())
+        {
+            bstream.ReadLimitedInt32(0, 63);
+        }
+
+        if (bstream.ReadBool())
+        {
+            bstream.ReadLimitedInt32(0, 8);
+        }
+
+        if (bstream.ReadBool())
+        {
+            bstream.ReadLimitedFloat(0.0f, 1.0f, 0.0078125f);
+        }
+
+        if (bstream.ReadBool())
+        {
+            bstream.ReadLimitedFloat(0.0f, 1.0f, 0.0078125f);
+        }
+
+        if (bstream.ReadBool())
+        {
+            bstream.ReadLimitedFloat(-5.0f, 5.0f, 0.0078125f);
+        }
+
+        if (bstream.ReadBool())
+        {
+            if (!bstream.ReadBool())
+            {
+                bstream.ReadBool();
+            }
+        }
+
+        bstream.ReadLimitedInt32(-1, 1);
+        bstream.ReadBool();
+
+        if (!bstream.ReadBool())
+        {
+            bstream.ReadLimitedFloat(-50.0f, 50.0f, 0.0625f);
+            bstream.ReadLimitedFloat(-50.0f, 50.0f, 0.0625f);
+        }
+
+        bstream.ReadBool();
+        bstream.ReadBool();
+        bstream.ReadBool();
+
+        if (bstream.ReadBool())
+        {
+            if (bstream.ReadBool()) // InteractWithDoorPacket
+            {
+                if (bstream.ReadBool())
+                {
+                    auto type = bstream.ReadLimitedInt32(0, 4);
+                    bstream.ReadString(1350);
+                    bstream.ReadLimitedInt32(0, 2);
+                    if (type == 2)
+                    {
+                        bstream.ReadLimitedString(L' ', L'z');
+                    }
+                }
+            }
+            if (bstream.ReadBool()) // LootInteractionPacket
+            {
+                if (bstream.ReadBool())
+                {
+                    std::wstring loot_id = bstream.ReadString(1350);
+                    uint32_t callback_id = bstream.ReadUInt32();
+                }
+            }
+            if (bstream.ReadBool()) // StationaryWeaponPacket
+            {
+                if (bstream.ReadBool())
+                {
+                    auto type = bstream.ReadUInt8();
+                    if (type == 0)
+                    {
+                        bstream.ReadString(1350);
+                    }
+                }
+            }
+            if (bstream.ReadBool()) // PlantItemPacket
+            {
+                if (bstream.ReadBool())
+                {
+                    bstream.ReadString(1350);
+                    bstream.ReadString(1350);
+                }
+            }
+        }
+
+        if (!bstream.ReadBool())
+        {
+            int optype = bstream.ReadLimitedInt32(0, 10);
+            bstream.ReadLimitedString(L' ', L'z');
+            bstream.ReadLimitedInt32(0, 2047);
+            if (optype == 6) // CreateMeds
+            {
+                bstream.ReadLimitedInt32(0, 7);
+                bstream.ReadFloat();
+            }
+            bstream.ReadLimitedInt32(-1, 3);
+        }
+    }
+
+    void update_loot(BitStream& bstream, tk::Observer* obs, bool outbound)
+    {
+        auto read_operation = [&]()
+        {
+            if (bstream.ReadBool())
+            {
+                auto data = bstream.ReadBytesAlloc();
+                int callback = bstream.ReadLimitedInt32(0, 2047);
+                int hash = bstream.ReadInt32();
+
+                CSharpByteStream cstream(data.data(), (int)data.size());
+                std::unique_ptr<Polymorph> polymorph = read_polymorph(&cstream);
+
+                if (polymorph->type == Polymorph::Type::InventoryMoveOperationDescriptor)
+                {
+                    InventoryMoveOperationDescriptor* desc = (InventoryMoveOperationDescriptor*)polymorph.get();
+                    // TODO: Loot refactor
+                    // This should move the object around, not destroy it. Destroying it allows us to hide it in the short term.
+                    //if (desc->from->type == Polymorph::Type::InventoryOwnerItselfDescriptor)
+                    {
+                        tk::g_state->map->destroy_loot_item_by_id(desc->item_id);
+                    }
+                }
+            }
         };
 
-        { // First pass - open item templates.
-            auto templates = load_file_as_json("db_templates.json");
-
-            for (auto& data_entry : templates.object_items())
-            {
-                LootItem item;
-                item.id = data_entry.first;
-
-                auto props = data_entry.second["_props"];
-
-                item.name = props["Name"].string_value();
-                item.value = props["CreditsPrice"].int_value();
-                item.lootable = !props["Unlootable"].bool_value();
-                item.bundle_path = props["Prefab"]["path"].string_value();
-                item.width = props["Width"].int_value();
-                item.height = props["Height"].int_value();
-
-                item.rarity = LootItem::Common;
-
-                if (props["Rarity"] == "Rare")
-                {
-                    item.rarity = LootItem::Rare;
-                }
-                else if (props["Rarity"] == "Superrare")
-                {
-                    item.rarity = LootItem::SuperRare;
-                }
-                else if (props["Rarity"] == "Not_exist")
-                {
-                    item.rarity = LootItem::NotExist;
-                }
-
-                item.overriden = false;
-
-                m_db[item.id] = std::move(item);
-            }
-        }
-
-        { // Second pass - correct name with localization.
-            auto locale = load_file_as_json("db_locale.json");
-            for (auto& data_entry : locale["templates"].object_items())
-            {
-                auto iter = m_db.find(data_entry.first);
-                if (iter != std::end(m_db))
-                {
-                    iter->second.name = data_entry.second["Name"].string_value();
-                }
-            }
-
-        }
-
-        { // Third pass - correct price.
-            auto prices = load_file_as_json("db_prices.json");
-            for (auto& data_array_entry : prices.array_items())
-            {
-                auto iter = m_db.find(data_array_entry["template"].string_value());
-                if (iter != std::end(m_db))
-                {
-                    iter->second.value = data_array_entry["price"].int_value();
-                }
-            }
-        }
-
-        { // Fourth pass - manual prices
-            auto prices = load_file_as_json("db_manualprices.json");
-            for (auto data_entry : prices.object_items())
-            {
-                auto iter = m_db.find(data_entry.first);
-                if (iter != std::end(m_db))
-                {
-                    iter->second.value = data_entry.second.int_value();
-                }
-            }
-        }
-
-        { // Fifth pass - manual override
-            auto overrides = load_file_as_json("db_questlewts.json");
-            for (auto data_entry : overrides["questlewts"].array_items())
-            {
-                auto iter = m_db.find(data_entry.string_value());
-                if (iter != std::end(m_db))
-                {
-                    iter->second.overriden = true;
-                }
-            }
-        }
-    }
-
-    LootItem* LootDatabase::query_loot(const std::string& id)
-    {
-        auto entry = m_db.find(id);
-        return entry == std::end(m_db) ? nullptr : &entry->second;
-    }
-
-    std::vector<std::unique_ptr<Polymorph>> read_polymorphs(uint8_t* data, int size)
-    {
-        CSharpByteStream stream(data, size);
-
-        std::vector<std::unique_ptr<Polymorph>> ret;
-        int num = stream.ReadInt32();
+        int num = bstream.ReadUInt8();
         for (int i = 0; i < num; ++i)
         {
-            ret.emplace_back(read_polymorph(&stream));
-        }
+            if (outbound)
+            {
+                read_operation();
+            }
+            else
+            {
+                int tag = bstream.ReadUInt8();
+                if (tag == 1) // command
+                {
+                    read_operation();
+                    continue;
+                }
 
-        return ret;
-    }
+                auto id = bstream.ReadUInt16();
+                int status = bstream.ReadLimitedInt32(0, 3);
+                if (status == 2)
+                {
+                    bstream.ReadLimitedString(L' ', L'\u007f');
+                }
+                if (bstream.ReadBool())
+                {
+                    bstream.ReadInt32();
+                    bstream.ReadBool();
+                }
+            }
 
-    template <typename T>
-    std::unique_ptr<Polymorph> make_polymorph(CSharpByteStream* stream, Polymorph::Type type)
-    {
-        T* desc = new T();
-        desc->type = type;
-        desc->read(stream);
-        return std::unique_ptr<Polymorph>(desc);
-    }
-
-    std::unique_ptr<Polymorph> read_polymorph(CSharpByteStream* stream)
-    {
-        Polymorph::Type type = (Polymorph::Type)stream->ReadByte();
-
-        switch (type)
-        {
-            case Polymorph::Type::FoodDrinkComponentDescriptor: return make_polymorph<FoodDrinkComponentDescriptor>(stream, type);
-            case Polymorph::Type::ResourceItemComponentDescriptor: return make_polymorph<ResourceItemComponentDescriptor>(stream, type);
-            case Polymorph::Type::LightComponentDescriptor: return make_polymorph<LightComponentDescriptor>(stream, type);
-            case Polymorph::Type::LockableComponentDescriptor: return make_polymorph<LockableComponentDescriptor>(stream, type);
-            case Polymorph::Type::MapComponentDescriptor: return make_polymorph< MapComponentDescriptor>(stream, type);
-            case Polymorph::Type::MedKitComponentDescriptor: return make_polymorph<MedKitComponentDescriptor>(stream, type);
-            case Polymorph::Type::RepairableComponentDescriptor: return make_polymorph<RepairableComponentDescriptor>(stream, type);
-            case Polymorph::Type::SightComponentDescriptor: return make_polymorph<SightComponentDescriptor>(stream, type);
-            case Polymorph::Type::TogglableComponentDescriptor: return make_polymorph<TogglableComponentDescriptor>(stream, type);
-            case Polymorph::Type::FaceShieldComponentDescriptor: return make_polymorph<FaceShieldComponentDescriptor>(stream, type);
-            case Polymorph::Type::FoldableComponentDescriptor: return make_polymorph<FoldableComponentDescriptor>(stream, type);
-            case Polymorph::Type::FireModeComponentDescriptor: return make_polymorph<FireModeComponentDescriptor>(stream, type);
-            case Polymorph::Type::DogTagComponentDescriptor: return make_polymorph<DogTagComponentDescriptor>(stream, type);
-            case Polymorph::Type::TagComponentDescriptor: return make_polymorph<TagComponentDescriptor>(stream, type);
-            case Polymorph::Type::KeyComponentDescriptor: return make_polymorph<KeyComponentDescriptor>(stream, type);
-            case Polymorph::Type::JsonLootItemDescriptor: return make_polymorph<JsonLootItemDescriptor>(stream, type);
-            case Polymorph::Type::JsonCorpseDescriptor: return make_polymorph<JsonCorpseDescriptor>(stream, type);
-            case Polymorph::Type::InventorySlotItemAddressDescriptor: return make_polymorph<InventorySlotItemAddressDescriptor>(stream, type);
-            case Polymorph::Type::InventoryStackSlotItemAddress: return make_polymorph<InventoryStackSlotItemAddress>(stream, type);
-            case Polymorph::Type::InventoryContainerDescriptor: return make_polymorph<InventoryContainerDescriptor>(stream, type);
-            case Polymorph::Type::InventoryGridItemAddressDescriptor: return make_polymorph<InventoryGridItemAddressDescriptor>(stream, type);
-            case Polymorph::Type::InventoryOwnerItselfDescriptor: return make_polymorph<InventoryOwnerItselfDescriptor>(stream, type);
-            case Polymorph::Type::InventoryRemoveOperationDescriptor: return make_polymorph<InventoryRemoveOperationDescriptor>(stream, type);
-            case Polymorph::Type::InventoryExamineOperationDescriptor: return make_polymorph<InventoryExamineOperationDescriptor>(stream, type);
-            case Polymorph::Type::InventoryCheckMagazineOperationDescriptor: return make_polymorph<InventoryCheckMagazineOperationDescriptor>(stream, type);
-            case Polymorph::Type::InventoryBindItemOperationDescriptor: return make_polymorph<InventoryBindItemOperationDescriptor>(stream, type);
-            case Polymorph::Type::InventoryMoveOperationDescriptor: return make_polymorph<InventoryMoveOperationDescriptor>(stream, type);
-            case Polymorph::Type::InventorySplitOperationDescriptor: return make_polymorph<InventorySplitOperationDescriptor>(stream, type);
-            case Polymorph::Type::InventoryMergeOperationDescriptor: return make_polymorph<InventoryMergeOperationDescriptor>(stream, type);
-            case Polymorph::Type::InventoryTransferOperationDescriptor: return make_polymorph<InventoryTransferOperationDescriptor>(stream, type);
-            case Polymorph::Type::InventorySwapOperationDescriptor: return make_polymorph<InventorySwapOperationDescriptor>(stream, type);
-            case Polymorph::Type::InventoryThrowOperationDescriptor: return make_polymorph<InventoryThrowOperationDescriptor>(stream, type);
-            case Polymorph::Type::InventoryToggleOperationDescriptor: return make_polymorph<InventoryToggleOperationDescriptor>(stream, type);
-            case Polymorph::Type::InventoryFoldOperationDescriptor: return make_polymorph<InventoryFoldOperationDescriptor>(stream, type);
-            case Polymorph::Type::InventoryShotOperationDescriptor: return make_polymorph<InventoryShotOperationDescriptor>(stream, type);
-            case Polymorph::Type::SetupItemOperationDescriptor: return make_polymorph<SetupItemOperationDescriptor>(stream, type);
-            case Polymorph::Type::ApplyHealthOperationDescriptor: return make_polymorph<ApplyHealthOperationDescriptor>(stream, type);
-            case Polymorph::Type::OperateStationaryWeaponOperationDescription: return make_polymorph<OperateStationaryWeaponOperationDescription>(stream, type);
-            default: __debugbreak(); assert(false); break;
-        }
-
-        return nullptr;
-    }
-
-    void FoodDrinkComponentDescriptor::read(CSharpByteStream* stream)
-    {
-        hp_percent = stream->ReadSingle();
-    }
-
-    void ResourceItemComponentDescriptor::read(CSharpByteStream* stream)
-    {
-        resource = stream->ReadSingle();
-    }
-
-    void LightComponentDescriptor::read(CSharpByteStream* stream)
-    {
-        active = stream->ReadBool();
-        mode = stream->ReadInt32();
-    }
-
-    void LockableComponentDescriptor::read(CSharpByteStream* stream)
-    {
-        locked = stream->ReadBool();
-    }
-
-    void InventoryLogicMapMarker::read(CSharpByteStream* stream)
-    {
-        type = stream->ReadInt32();
-        x = stream->ReadInt32();
-        y = stream->ReadInt32();
-        note = stream->ReadString();
-    }
-
-    void MapComponentDescriptor::read(CSharpByteStream* stream)
-    {
-        int num = stream->ReadInt32();
-        for (int i = 0; i < num; ++i)
-        {
-            InventoryLogicMapMarker marker;
-            marker.read(stream);
-            markers.emplace_back(std::move(marker));
         }
     }
 
-    void MedKitComponentDescriptor::read(CSharpByteStream* stream)
+    void update_network_player(BitStream& bstream, int channel)
     {
-        hp = stream->ReadSingle();
-    }
+        std::lock_guard<std::mutex> lock(g_world_lock);
 
-    void RepairableComponentDescriptor::read(CSharpByteStream* stream)
-    {
-        durability = stream->ReadSingle();
-        max_durability = stream->ReadSingle();
-    }
+        Observer* obs = g_state->map->get_observer(channel);
 
-    void SightComponentDescriptor::read(CSharpByteStream* stream)
-    {
-        sight_mode = stream->ReadInt32();
-    }
-
-    void TogglableComponentDescriptor::read(CSharpByteStream* stream)
-    {
-        on = stream->ReadBool();
-    }
-
-    void FaceShieldComponentDescriptor::read(CSharpByteStream* stream)
-    {
-        hits = stream->ReadByte();
-        hit_seed = stream->ReadByte();
-    }
-
-    void FoldableComponentDescriptor::read(CSharpByteStream* stream)
-    {
-        folded = stream->ReadBool();
-    }
-
-    void FireModeComponentDescriptor::read(CSharpByteStream* stream)
-    {
-        fire_mode = stream->ReadInt32();
-    }
-
-    void DogTagComponentDescriptor::read(CSharpByteStream* stream)
-    {
-        name = stream->ReadString();
-        side = stream->ReadInt32();
-        level = stream->ReadInt32();
-        time = stream->ReadDouble();
-        status = stream->ReadString();
-        killer_name = stream->ReadString();
-        weapon_name = stream->ReadString();
-    }
-
-    void TagComponentDescriptor::read(CSharpByteStream* stream)
-    {
-        name = stream->ReadString();
-        colour = stream->ReadInt32();
-    }
-
-    void KeyComponentDescriptor::read(CSharpByteStream* stream)
-    {
-        uses = stream->ReadInt32();
-    }
-
-    void SlotDescriptor::read(CSharpByteStream* stream)
-    {
-        id = stream->ReadString();
-        contained_item = std::make_unique<ItemDescriptor>();
-        contained_item->read(stream);
-    }
-
-    void LocationInGrid::read(CSharpByteStream* stream)
-    {
-        x = stream->ReadInt32();
-        y = stream->ReadInt32();
-        rotation = stream->ReadInt32();
-        searched = stream->ReadBool();
-    }
-
-    void ItemInGridDescriptor::read(CSharpByteStream* stream)
-    {
-        location.read(stream);
-        item = std::make_unique<ItemDescriptor>();
-        item->read(stream);
-    }
-
-    void GridDescriptor::read(CSharpByteStream* stream)
-    {
-        id = stream->ReadString();
-        int num = stream->ReadInt32();
-        for (int i = 0; i < num; ++i)
+        if (!obs)
         {
-            ItemInGridDescriptor desc;
-            desc.read(stream);
-            items.emplace_back(std::move(desc));
+            // I suspect this is caused by receiving game updates for observers before we receive the spawn message.
+            // This leads to "phantom observers".
+            // Fixing this will require us to understand unet acks in more detail and deliver messages on ordered channels strictly in-order.
+            Observer new_obs;
+            new_obs.pid = -1;
+            new_obs.cid = channel;
+            new_obs.type = Observer::ObserverType::Player;
+            new_obs.name = "UNKNOWN?!";
+            g_state->map->create_observer(channel, std::move(new_obs));
+            obs = g_state->map->get_observer(channel);
+        }
+
+        if (obs->type != Observer::Self)
+        {
+            // ObservedPlayer::OnDeserializeFromServer(byte channelId, IBitReaderStream reader, int rtt)
+            // void ObservedPlayer.GInterface89.Receive(IBitReaderStream reader, GClass656 destinationFramesInfoQueue)
+
+            auto num = bstream.ReadBool() ? bstream.ReadLimitedInt32(1, 5) : bstream.ReadLimitedInt32(0, 2097151);
+            auto time = bstream.ReadFloat();
+            auto is_disconnected = bstream.ReadBool();
+
+            if (!bstream.ReadBool())
+            {
+                g_state->map->get_observer(channel)->is_dead = true;
+            }
+            else
+            {
+                update_position(bstream, obs);
+                update_rotation(bstream, obs);
+                skip_misc_stuff(bstream);
+                update_loot(bstream, obs, false);
+            }
         }
     }
 
-    void StackSlotDescriptor::read(CSharpByteStream* stream)
+    void update_network_world(BitStream& bstream, int channel)
     {
-        id = stream->ReadString();
-        int num = stream->ReadInt32();
-        for (int i = 0; i < num; ++i)
+        if (bstream.ReadBool()) // DeserializeInteractiveObjectsStatusPacket
         {
-            std::unique_ptr<ItemDescriptor> item = std::make_unique<ItemDescriptor>();
-            item->read(stream);
-            items.emplace_back(std::move(item));
-        }
-    }
-
-    void ItemDescriptor::read(CSharpByteStream* stream)
-    {
-        id = stream->ReadString();
-        template_id = stream->ReadString();
-        stack_count = stream->ReadInt32();
-        spawned_in_session = stream->ReadBool();
-        int num1 = stream->ReadInt32();
-        for (int i = 0; i < num1; ++i)
-        {
-            components.emplace_back(read_polymorph(stream));
-        }
-        int num2 = stream->ReadInt32();
-        for (int i = 0; i < num2; ++i)
-        {
-            SlotDescriptor desc;
-            desc.read(stream);
-            slots.emplace_back(std::move(desc));
-        }
-        int num3 = stream->ReadInt32();
-        for (int i = 0; i < num3; ++i)
-        {
-            GridDescriptor desc;
-            desc.read(stream);
-            grids.emplace_back(std::move(desc));
-        }
-        int num4 = stream->ReadInt32();
-        for (int i = 0; i < num4; ++i)
-        {
-            StackSlotDescriptor desc;
-            desc.read(stream);
-            stack_slots.emplace_back(std::move(desc));
-        }
-    }
-
-    void JsonLootItemDescriptor::read(CSharpByteStream* stream)
-    {
-        if (stream->ReadBool())
-        {
-            id = stream->ReadString();
+            return;
         }
 
-        position = stream->ReadVector();
-        rotation = stream->ReadVector();
-        item.read(stream);
-
-        if (stream->ReadBool())
+        if (bstream.ReadBool()) // DeserializeSpawnQuestLootPacket
         {
-            int num = stream->ReadInt32();
+            return;
+        }
+
+        if (bstream.ReadBool()) // DeserializeUpdateExfiltrationPointPacket
+        {
+            return;
+        }
+
+        if (bstream.ReadBool()) // DeserializeLampChangeStatePacket
+        {
+            return;
+        }
+
+        if (bstream.ReadBool()) // DeserializeLootSyncPackets
+        {
+            auto num = bstream.ReadLimitedInt32(1, 64);
             for (int i = 0; i < num; ++i)
             {
-                profiles.emplace_back(stream->ReadString());
+                auto id = bstream.ReadInt32();
+
+                std::lock_guard<std::mutex> lock(g_world_lock);
+                TemporaryLoot* loot = g_state->map->get_or_create_temporary_loot(id);
+
+                if (bstream.ReadBool())
+                {
+                    Vector3Quantizer quant(-10.0f, 10.0f, 0.001953125f, -10.0f, 10.0f, 0.0009765625f, -10.0f, 10.0f, 0.001953125f, true);
+
+                    loot->pos.x += bstream.ReadQuantizedFloat(&quant._xFloatQuantizer);
+                    loot->pos.y += bstream.ReadQuantizedFloat(&quant._yFloatQuantizer);
+                    loot->pos.z += bstream.ReadQuantizedFloat(&quant._zFloatQuantizer);
+                }
+                else
+                {
+                    Vector3Quantizer quant(
+                        g_state->map->bounds_min().x, g_state->map->bounds_max().x, 0.001953125f,
+                        g_state->map->bounds_min().y, g_state->map->bounds_max().y, 0.0009765625f,
+                        g_state->map->bounds_min().z, g_state->map->bounds_max().z, 0.001953125f,
+                        true);
+
+                    loot->pos.x = bstream.ReadQuantizedFloat(&quant._xFloatQuantizer);
+                    loot->pos.y = bstream.ReadQuantizedFloat(&quant._yFloatQuantizer);
+                    loot->pos.z = bstream.ReadQuantizedFloat(&quant._zFloatQuantizer);
+                }
             }
         }
-
-        is_static = stream->ReadBool();
-        use_gravity = stream->ReadBool();
-        random_rotation = stream->ReadBool();
-        shift = stream->ReadVector();
-        platform_id = stream->ReadInt16();
     }
 
-    void ClassTransformSync::read(CSharpByteStream* stream)
+    void process_game_update(ByteStream* stream, int channel)
     {
-        position = stream->ReadVector();
-        rotation = stream->ReadQuaternion();
-    }
+        // see internal void method_7(byte channelId, NetworkReader reader)
+        auto data = stream->ReadBytesAndSize();
 
-    void JsonCorpseDescriptor::read(CSharpByteStream* stream)
-    {
-        int num1 = stream->ReadInt32();
-        for (int i = 0; i < num1; ++i)
+        // see now bool method_6(byte channelId, IBitReaderStream reader, int rtt)
+        BitStream bstream(data.data(), (int)data.size());
+
+        if (bstream.ReadLimitedInt32(0, 1) == 1)
         {
-            int entry = stream->ReadInt32();
-            std::string str = stream->ReadString();
-            customization[entry] = std::move(str);
+            update_network_player(bstream, channel);
         }
-        side = stream->ReadInt32();
-        int num2 = stream->ReadInt32();
-        for (int i = 0; i < num2; ++i)
+        else
         {
-            ClassTransformSync bone;
-            bone.read(stream);
-            bones.emplace_back(std::move(bone));
+            update_network_world(bstream, channel);
         }
+    }
 
-        if (stream->ReadBool())
+    void process_game_update_outbound(ByteStream* stream, int channel)
+    {
+        auto data = stream->ReadBytesAndSize();
+        BitStream bstream(data.data(), (int)data.size());
+
+        int num = bstream.ReadLimitedInt32(0, 127);
+        for (int i = 0; i < num; ++i)
         {
-            id = stream->ReadString();
+            auto rtt = bstream.ReadBool() ? bstream.ReadUInt16() : 0;
+            auto dt = bstream.ReadLimitedFloat(0, 1, 0.0009765625);
+            auto frame = bstream.ReadLimitedInt32(0, 2097151);
+            auto frame_2 = bstream.ReadBool()
+                ? bstream.ReadLimitedInt32(0, 2097151)
+                : bstream.ReadLimitedInt32(0, 15);
+
+            std::lock_guard<std::mutex> lock(g_world_lock);
+            tk::Observer* player = g_state->map->get_observer(channel);
+            update_position(bstream, player);
+            update_rotation(bstream, player);
+            skip_misc_stuff(bstream);
+            update_loot(bstream, player, true);
         }
-
-        position = stream->ReadVector();
-        rotation = stream->ReadVector();
-        item.read(stream);
-
-        if (stream->ReadBool())
-        {
-            int num3 = stream->ReadInt32();
-            for (int i = 0; i < num3; ++i)
-            {
-                profiles.emplace_back(stream->ReadString());
-            }
-        }
-
-        is_static = stream->ReadBool();
-        use_gravity = stream->ReadBool();
-        random_rotation = stream->ReadBool();
-        shift = stream->ReadVector();
-        platform_id = stream->ReadInt16();
-    }
-
-    void InventorySlotItemAddressDescriptor::read(CSharpByteStream* stream)
-    {
-        container.read(stream);
-    }
-
-    void InventoryStackSlotItemAddress::read(CSharpByteStream* stream)
-    {
-        container.read(stream);
-    }
-
-    void InventoryContainerDescriptor::read(CSharpByteStream* stream)
-    {
-        parent_id = stream->ReadString();
-        container_id = stream->ReadString();
-    }
-
-    void InventoryGridItemAddressDescriptor::read(CSharpByteStream* stream)
-    {
-        location_in_grid.read(stream);
-        container.read(stream);
-    }
-
-    void InventoryOwnerItselfDescriptor::read(CSharpByteStream* stream)
-    {
-        container.read(stream);
-    }
-
-    void InventoryRemoveOperationDescriptor::read(CSharpByteStream* stream)
-    {
-        item_id = stream->ReadString();
-        operation_id = stream->ReadUInt16();
-    }
-
-    void InventoryExamineOperationDescriptor::read(CSharpByteStream* stream)
-    {
-        item_id = stream->ReadString();
-        operation_id = stream->ReadUInt16();
-    }
-
-    void InventoryCheckMagazineOperationDescriptor::read(CSharpByteStream* stream)
-    {
-        item_id = stream->ReadString();
-        check_status = stream->ReadBool();
-        skill_level = stream->ReadInt32();
-        operation_id = stream->ReadUInt16();
-    }
-
-    void InventoryBindItemOperationDescriptor::read(CSharpByteStream* stream)
-    {
-        item_id = stream->ReadString();
-        index = stream->ReadInt32();
-        operation_id = stream->ReadUInt16();
-    }
-
-    void InventoryMoveOperationDescriptor::read(CSharpByteStream* stream)
-    {
-        item_id = stream->ReadString();
-        from = read_polymorph(stream);
-        to = read_polymorph(stream);
-        operation_id = stream->ReadUInt16();
-    }
-
-    void InventorySplitOperationDescriptor::read(CSharpByteStream* stream)
-    {
-        item_id = stream->ReadString();
-        from = read_polymorph(stream);
-        to = read_polymorph(stream);
-        count = stream->ReadInt32();
-        operation_id = stream->ReadUInt16();
-    }
-
-    void InventoryMergeOperationDescriptor::read(CSharpByteStream* stream)
-    {
-        item_id = stream->ReadString();
-        item1_id = stream->ReadString();
-        operation_id = stream->ReadUInt16();
-    }
-
-    void InventoryTransferOperationDescriptor::read(CSharpByteStream* stream)
-    {
-        item_id = stream->ReadString();
-        item1_id = stream->ReadString();
-        count = stream->ReadInt32();
-        operation_id = stream->ReadUInt16();
-    }
-
-    void InventorySwapOperationDescriptor::read(CSharpByteStream* stream)
-    {
-        item_id = stream->ReadString();
-        to = read_polymorph(stream);
-        item1_id = stream->ReadString();
-        to1 = read_polymorph(stream);
-        operation_id = stream->ReadUInt16();
-    }
-
-    void InventoryThrowOperationDescriptor::read(CSharpByteStream* stream)
-    {
-        item_id = stream->ReadString();
-        operation_id = stream->ReadUInt16();
-    }
-
-    void InventoryToggleOperationDescriptor::read(CSharpByteStream* stream)
-    {
-        item_id = stream->ReadString();
-        value = stream->ReadBool();
-        operation_id = stream->ReadUInt16();
-    }
-
-    void InventoryFoldOperationDescriptor::read(CSharpByteStream* stream)
-    {
-        item_id = stream->ReadString();
-        value = stream->ReadBool();
-        operation_id = stream->ReadUInt16();
-    }
-
-    void InventoryShotOperationDescriptor::read(CSharpByteStream* stream)
-    {
-        item_id = stream->ReadString();
-        operation_id = stream->ReadUInt16();
-    }
-
-    void SetupItemOperationDescriptor::read(CSharpByteStream* stream)
-    {
-        item_id = stream->ReadString();
-        zone_id = stream->ReadString();
-        position = stream->ReadVector();
-        rotation = stream->ReadQuaternion();
-        setup_time = stream->ReadSingle();
-        operation_id = stream->ReadUInt16();
-    }
-
-    void ApplyHealthOperationDescriptor::read(CSharpByteStream* stream)
-    {
-        item_id = stream->ReadString();
-        body_part = stream->ReadInt32();
-        count = stream->ReadInt32();
-        operation_id = stream->ReadUInt16();
-    }
-
-    void OperateStationaryWeaponOperationDescription::read(CSharpByteStream* stream)
-    {
-        weapon_id = stream->ReadString();
-        operation_id = stream->ReadUInt16();
     }
 }
