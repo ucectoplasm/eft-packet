@@ -80,18 +80,23 @@ namespace tk
             // json
             auto unk2 = stream->ReadBytesAndSize();
         }
+        
+        {
+            // json
+            auto unk3 = stream->ReadBytesAndSize();
+        }
 
-        auto unk3 = stream->ReadBool();
+        auto unk4 = stream->ReadBool();
         auto member_type = stream->ReadInt32(); // see EMemberCategory
-        auto unk4 = stream->ReadSingle(); // dt?
+        auto unk5 = stream->ReadSingle(); // dt?
 
         {
             // List of lootables? (no locations yet)
             // json
-            auto unk5 = stream->ReadBytesAndSize();
+            auto unk6 = stream->ReadBytesAndSize();
         }
 
-        auto unk6 = stream->ReadBytesAndSize();
+        auto unk7 = stream->ReadBytesAndSize();
 
         {
             // GClass806.SetupPositionQuantizer(@class.response.bounds_0);
@@ -102,8 +107,8 @@ namespace tk
             g_state->map = std::make_unique<Map>(bound_min, bound_max);
         }
 
-        auto unk7 = stream->ReadUInt16();
-        auto unk8 = stream->ReadByte();
+        auto unk8 = stream->ReadUInt16();
+        auto unk9 = stream->ReadByte();
     }
 
     void process_world_spawn(ByteStream* stream) { }
