@@ -80,7 +80,7 @@ namespace tk
             // json
             auto unk2 = stream->ReadBytesAndSize();
         }
-        
+
         {
             // json
             auto unk3 = stream->ReadBytesAndSize();
@@ -355,9 +355,10 @@ namespace tk
             bstream.ReadLimitedInt32(0, 63);
         }
 
-        if (bstream.ReadBool())
-        {
-            bstream.ReadLimitedInt32(0, 8);
+        if (bstream.ReadBool()) {
+            Vector2Quantizer quant(-1f, 1f, 0.03125f, -1f, 1f, 0.03125f);
+            bstream.ReadQuantizedFloat(&quant._xFloatQuantizer);
+            bstream.ReadQuantizedFloat(&quant._yFloatQuantizer);
         }
 
         if (bstream.ReadBool())
