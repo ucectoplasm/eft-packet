@@ -356,7 +356,7 @@ namespace tk
         }
 
         if (bstream.ReadBool()) {
-            Vector2Quantizer quant(-1f, 1f, 0.03125f, -1f, 1f, 0.03125f);
+            Vector2Quantizer quant(-1.0f, 1.0f, 0.03125f, -1.0f, 1.0f, 0.03125f);
             bstream.ReadQuantizedFloat(&quant._xFloatQuantizer);
             bstream.ReadQuantizedFloat(&quant._yFloatQuantizer);
         }
