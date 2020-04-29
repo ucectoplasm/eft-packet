@@ -357,7 +357,9 @@ namespace tk
 
         if (bstream.ReadBool())
         {
-            bstream.ReadLimitedInt32(0, 8);
+            Vector2Quantizer quant(-1.0f, 1.0f, 0.03125f, -1.0f, 1.0f, 0.03125f);
+            bstream.ReadQuantizedFloat(&quant._xFloatQuantizer);
+            bstream.ReadQuantizedFloat(&quant._yFloatQuantizer);
         }
 
         if (bstream.ReadBool())
