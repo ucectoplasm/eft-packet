@@ -255,11 +255,11 @@ namespace tk
         sight_mode = stream->ReadInt32();
         
         int num = stream->ReadInt32();
-    	for(int i = 0; i < num; i++)
-    	{
-    		// Dumping these values for now
+        for(int i = 0; i < num; i++)
+        {
+            // Dumping these values for now
             auto dump = stream->ReadInt32();
-    	}
+        }
  
         int num2 = stream->ReadInt32();
         for (int i = 0; i < num2; i++)
