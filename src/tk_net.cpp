@@ -219,6 +219,7 @@ namespace tk
             auto json = json11::Json::parse((char*)profile_zip_data.data(), err);
 
             auto id = json["_id"].string_value();
+            auto aid = json["aid"].string_value();
             auto info_name = json["Info"]["Nickname"].string_value();
             auto info_level = json["Info"]["Level"].int_value();
             auto info_side = json["Info"]["Side"].string_value();
@@ -234,7 +235,7 @@ namespace tk
             }
 
             obs.type = is_scav ? Observer::Scav : Observer::Player;
-            obs.is_npc = is_scav && info_level == 1;
+            obs.is_npc = is_scav && aid == "0";
             obs.id = id;
             obs.group_id = info_group_id;
             obs.name = info_name;
