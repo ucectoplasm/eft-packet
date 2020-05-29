@@ -136,6 +136,11 @@ namespace tk
                 recursive_add_items(item_in_grid.item.get(), entries);
             }
         }
+
+        for (const auto& attachment : desc->slots)
+        {
+            recursive_add_items(attachment.contained_item.get(), entries);
+        }
     }
 
     void process_subworld_spawn(ByteStream* stream)
