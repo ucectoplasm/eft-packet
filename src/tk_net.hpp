@@ -310,6 +310,12 @@ namespace tk
             return { ReadFloat(), ReadFloat(), ReadFloat() };
         }
 
+		void ReadCheck(uint32_t num = 0)
+		{
+			m_buffer.ReadAlign();
+			m_buffer.ReadBits(32);
+		}
+
         std::wstring ReadString(uint32_t max_size = 0)
         {
             if (ReadBool())

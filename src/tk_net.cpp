@@ -9,6 +9,8 @@
 
 namespace tk
 {
+    static bool s_encrypted = false;
+
     void process_server_init(ByteStream* stream);
     void process_world_spawn(ByteStream* stream);
     void process_world_unspawn(ByteStream* stream);
@@ -33,7 +35,7 @@ namespace tk
             if (outbound)
             {
                 // Only care about 170 for outbound local player updates.
-                if (packet == PacketCode::GameUpdate)
+                if (!s_encrypted && packet == PacketCode::GameUpdate)
                 {
                     process_game_update_outbound(stream, channel);
                 }
@@ -52,7 +54,7 @@ namespace tk
                 case PacketCode::ObserverSpawn: process_observer_spawn(stream); break;
                 case PacketCode::ObserverUnspawn: process_observer_unspawn(stream); break;
                 case PacketCode::BattleEye: break; // ignored
-                case PacketCode::GameUpdate: process_game_update(stream, channel); break;
+                case PacketCode::GameUpdate: if (!s_encrypted) process_game_update(stream, channel); break;
                 default: break; // unhandled
                 }
             }
@@ -64,39 +66,19 @@ namespace tk
 
     void process_server_init(ByteStream* stream)
     {
-        auto unk0 = stream->ReadByte();
+		s_encrypted = stream->ReadBool(); // encrypt
+		stream->ReadBool(); // decrypt
         auto realDateTime = stream->ReadBool() ? 0 : stream->ReadInt64();
         auto gameDateTime = stream->ReadInt64();
         auto timeFactor = stream->ReadSingle();
-
-        {
-            // ASSET BUNDLES TO LOAD?
-            // json
-            auto unk1 = stream->ReadBytesAndSize();
-        }
-
-        {
-            // WEATHER?
-            // json
-            auto unk2 = stream->ReadBytesAndSize();
-        }
-        
-        {
-            // json
-            auto unk3 = stream->ReadBytesAndSize();
-        }
-
-        auto unk4 = stream->ReadBool();
+        stream->ReadBytesAndSize();
+        stream->ReadBytesAndSize();
+        stream->ReadBytesAndSize();
+        stream->ReadBool();
         auto member_type = stream->ReadInt32(); // see EMemberCategory
-        auto unk5 = stream->ReadSingle(); // dt?
-
-        {
-            // List of lootables? (no locations yet)
-            // json
-            auto unk6 = stream->ReadBytesAndSize();
-        }
-
-        auto unk7 = stream->ReadBytesAndSize();
+        stream->ReadSingle(); // dt?
+        stream->ReadBytesAndSize();
+        stream->ReadBytesAndSize();
 
         {
             // GClass806.SetupPositionQuantizer(@class.response.bounds_0);
@@ -107,8 +89,8 @@ namespace tk
             g_state->map = std::make_unique<Map>(bound_min, bound_max);
         }
 
-        auto unk8 = stream->ReadUInt16();
-        auto unk9 = stream->ReadByte();
+        stream->ReadUInt16();
+        stream->ReadByte();
     }
 
     void process_world_spawn(ByteStream* stream) { }
@@ -393,6 +375,8 @@ namespace tk
             }
         }
 
+        bstream.ReadCheck();
+
         bstream.ReadLimitedInt32(-1, 1);
         bstream.ReadBool();
 
@@ -405,6 +389,8 @@ namespace tk
         bstream.ReadBool();
         bstream.ReadBool();
         bstream.ReadBool();
+
+        bstream.ReadCheck();
 
         if (bstream.ReadBool())
         {
@@ -449,6 +435,8 @@ namespace tk
                 }
             }
         }
+
+        bstream.ReadCheck();
 
         if (!bstream.ReadBool())
         {
@@ -551,12 +539,17 @@ namespace tk
             auto time = bstream.ReadFloat();
             auto is_disconnected = bstream.ReadBool();
 
+            bstream.ReadCheck(299);
+
             if (!bstream.ReadBool())
             {
                 g_state->map->get_observer(channel)->is_dead = true;
             }
             else
             {
+				bstream.ReadCheck(304); // DeserializeDiffUsing(IBitReaderStream reader, ref GStruct118 current, GStruct118 prevFrame)
+				bstream.ReadCheck(); // inside DeserializeDiffUsing(IBitReaderStream reader, ref GStruct90 movementInfoPacket, GStruct90 prevFrame, GStruct89 context)
+
                 update_position(bstream, obs);
                 update_rotation(bstream, obs);
                 skip_misc_stuff(bstream);
@@ -656,6 +649,8 @@ namespace tk
 
             std::lock_guard<std::mutex> lock(g_world_lock);
             tk::Observer* player = g_state->map->get_observer(channel);
+
+            bstream.ReadCheck(); // SerializeDiffUsing(IBitWriterStream writer, ref GStruct90 current, GStruct90 prevFrame)
             update_position(bstream, player);
             update_rotation(bstream, player);
             skip_misc_stuff(bstream);

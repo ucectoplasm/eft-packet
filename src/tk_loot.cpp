@@ -566,6 +566,7 @@ namespace tk
     void InventoryThrowOperationDescriptor::read(CSharpByteStream* stream)
     {
         item_id = stream->ReadString();
+        down_direction = stream->ReadBool();
         operation_id = stream->ReadUInt16();
     }
 

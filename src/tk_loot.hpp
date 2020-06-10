@@ -497,6 +497,7 @@ namespace tk
     struct InventoryThrowOperationDescriptor : public Polymorph
     {
         std::string item_id; // ItemId = reader.ReadString(),
+        bool down_direction; // DownDirection = reader.ReadBoolean(),
         uint16_t operation_id; // OperationId = reader.ReadUInt16()
         void read(CSharpByteStream* stream);
     };
