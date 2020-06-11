@@ -31,6 +31,8 @@
 
 #define LOCAL_ADAPTER_IP_ADDRESS "fill.me.in" // ipconfig in cmd prompt on cheat machine, find local address, fill it in here
 #define MACHINE_PLAYING_GAME_IP_ADDRESS "fill.me.in" // the local IP address of the machine communicating with EFT servers
+
+//#define HTTP_SERVER_ENABLE // uncomment to turn on embedded http server - note this is a detection vector
 #define HTTP_SERVER_ADDRESS MACHINE_PLAYING_GAME_IP_ADDRESS
 #define HTTP_SERVER_PORT 12345
 
@@ -70,7 +72,9 @@ void do_render(GraphicsState* state);
 GraphicsState make_gfx(SDL_GLContext ctx, SDL_Window* window);
 void resize_gfx(GraphicsState* state, int width, int height);
 
+#if defined(HTTP_SERVER_ENABLE)
 std::unique_ptr<httplib::Server> make_server();
+#endif
 
 int SDL_main(int argc, char* argv[])
 {
@@ -181,8 +185,11 @@ int SDL_main(int argc, char* argv[])
     SDL_GL_SetSwapInterval(1);
 
     GraphicsState gfx = make_gfx(ctx, win);
+
+#if defined(HTTP_SERVER_ENABLE)
     std::unique_ptr<httplib::Server> server = make_server();
     std::unique_ptr<std::thread> server_thread = std::make_unique<std::thread>([&]() { server->listen(HTTP_SERVER_ADDRESS, HTTP_SERVER_PORT); });
+#endif
 
     bool quit = false;
 
@@ -232,8 +239,10 @@ int SDL_main(int argc, char* argv[])
 
     net_thread->join();
 
+#if defined(HTTP_SERVER_ENABLE)
     server->stop();
     server_thread->join();
+#endif
 
     gltTerminate();
     SDL_GL_DeleteContext(ctx);
@@ -1031,6 +1040,7 @@ void resize_gfx(GraphicsState* state, int width, int height)
     state->height = height;
 }
 
+#if defined(HTTP_SERVER_ENABLE)
 std::unique_ptr<httplib::Server> make_server()
 {
     std::unique_ptr<httplib::Server> server = std::make_unique<httplib::Server>();
@@ -1352,3 +1362,4 @@ std::unique_ptr<httplib::Server> make_server()
 
     return server;
 }
+#endif
