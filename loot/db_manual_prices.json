@@ -1,0 +1,16 @@
+{
+    "5449016a4bdc2d6f028b456f": 1, // roubles
+
+	// Manually corrected market prices
+
+	"5ce69cbad7f00c00b61c5098": 15000,	// Magpul PMAG .308 AC 5-round M700 magazine
+	"5c471c2d2e22164bef5d077f": 10000,	// SVDS Upper Band
+	"5ac72e615acfc43f67248aa0": 42000,	// Izhmash 5.56x45 AK-101 muzzlebrake & compensator
+	"5926d3c686f77410de68ebc8": 45000,	// HK A2 Stock
+	"59f32bb586f774757e1e8442": 10000,	// Bear Dogtag
+	"59f32c3b86f77472a31742f0": 10000,	// Usec Dogtag
+	"5aa2ba46e5b5b000137b758d": 0		// SAS Disk
+
+
+
+}

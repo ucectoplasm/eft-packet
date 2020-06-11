@@ -8,19 +8,26 @@
 
 namespace tk
 {
-    struct LootEntry
+    static constexpr int LootInstanceOwnerInvalid = -2;
+    static constexpr int LootInstanceOwnerWorld = -1;
+
+    struct LootInstance
     {
-        Vector3 pos; // unused for inventory loot
         std::string id;
-        std::string name;
-        int value;
+        std::string parent_id;
+        int csharp_hash;
+        int owner;
+        LootTemplate* template_;
+        Vector3 pos; // unused for inventory loot
+        int stack_count;
+        int value; // template_->value * stack_count
         int value_per_slot;
-        bool unknown = false;
         bool highlighted = false;
-        bool overriden = false;
-        LootItem::Rarity rarity;
-        std::string bundle_path;
+        bool inaccessible = false; // is a secure container or scabbard
     };
+
+    int get_loot_instance_owner(LootInstance* loot);
+    bool is_loot_instance_inaccessible(LootInstance* loot);
 
     struct Observer
     {
@@ -46,18 +53,6 @@ namespace tk
         bool is_dead = false;
         bool is_npc = false;
         bool is_unspawned = false;
-
-        // TODO: Loot refactor
-        // This should be a vector of std::strings (object IDs) corresponding with loot entries in the loot table.
-        std::vector<LootEntry> inventory;
-    };
-
-    // TODO: Loot refactor
-    // This should not exist. Loot should already be in the loot list. Just move from obs to world.
-    struct TemporaryLoot
-    {
-        int id; // hash of either template ID or object ID, C# GetHashCode()
-        Vector3 pos;
     };
 
     class Map
@@ -74,28 +69,21 @@ namespace tk
         std::vector<Observer*> get_observers();
         Observer* get_player();
 
-        void add_loot_item(LootEntry&& entry);
-        std::vector<LootEntry*> get_loot();
-        void destroy_loot_item_by_id(std::string& id);
-        LootEntry* get_loot_by_id(std::string& id);
+        // all loot instances
+        LootInstance* add_loot_instance(LootInstance&& instance);
+        void destroy_loot_instance_by_id(const std::string& id);
+        LootInstance* get_loot_instance_by_id(const std::string& id);
+        std::vector<LootInstance*> get_loot();
 
         void add_static_corpse(Vector3 pos);
         std::vector<Vector3*> get_static_corpses();
-
-        TemporaryLoot* get_or_create_temporary_loot(int id);
-        std::vector<TemporaryLoot*> get_temporary_loots();
 
     private:
 
         Vector3 m_min;
         Vector3 m_max;
         std::unordered_map<uint8_t, Observer> m_observers;
-        std::unordered_map<int, TemporaryLoot> m_temporary_loot;
-        std::unordered_map<std::string, LootEntry> m_loot;
+        std::unordered_map<std::string, LootInstance> m_loot;
         std::vector<Vector3> m_static_corpses;
-
-        // TODO: Loot refactor
-        // This should be a vector of std::strings (object IDs) corresponding with loot entries in the loot table.
-        // std::vector<std::string> m_world_loot;
     };
 }

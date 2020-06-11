@@ -8,35 +8,38 @@
 
 namespace tk
 {
-    struct LootItem
+    struct LootTemplate
     {
-        enum Rarity
-        {
-            Common,
-            Rare,
-            SuperRare,
-            NotExist
-        };
-
-        std::string id;
+        std::string template_id;
         std::string name;
-        int value;
-        bool lootable;
-        Rarity rarity;
+        int value = 0;
         std::string bundle_path;
-        int width;
-        int height;
-        bool overriden;
+        int width = 1;
+        int height = 1;
+        bool is_food = false;
+    };
+
+    struct Category
+    {
+        std::string name;
+        int r;
+        int g;
+        int b;
+        float beam_height;
     };
 
     class LootDatabase
     {
     public:
         LootDatabase();
-        LootItem* query_loot(const std::string& id);
+
+        LootTemplate* query_template(const std::string& template_id);
+        Category* get_category_for_template(const std::string& template_id);
 
     private:
-        std::unordered_map<std::string, LootItem> m_db;
+        std::unordered_map<std::string, LootTemplate> m_templates;
+        std::vector<Category> m_categories;
+        std::unordered_map<std::string, size_t> m_items_to_categories; // template id -> category idx
     };
 
     struct Polymorph

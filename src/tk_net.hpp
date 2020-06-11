@@ -1,5 +1,6 @@
 #pragma once
 
+#include "tk.hpp"
 #include "common.hpp"
 
 #include <cstdint>
@@ -310,11 +311,12 @@ namespace tk
             return { ReadFloat(), ReadFloat(), ReadFloat() };
         }
 
-		void ReadCheck(uint32_t num = 0)
-		{
-			m_buffer.ReadAlign();
-			m_buffer.ReadBits(32);
-		}
+        void ReadCheck(uint32_t num = 0)
+        {
+            m_buffer.ReadAlign();
+            uint32_t check = m_buffer.ReadBits(32);
+			TK_ASSERT(!num || check == num);
+        }
 
         std::wstring ReadString(uint32_t max_size = 0)
         {
@@ -325,6 +327,7 @@ namespace tk
             std::wstring data;
             m_buffer.ReadAlign();
             int num = ReadInt32();
+            TK_ASSERT(num <= (int)max_size);
             for (int i = 0; i < num; i++)
             {
                 data.push_back(ReadChar());
@@ -342,6 +345,7 @@ namespace tk
             std::wstring data;
             m_buffer.ReadAlign();
             int num = ReadInt32();
+            TK_ASSERT(num <= 1350);
             int bits = BitRequired((int)min, (int)max);
             for (int i = 0; i < num; i++)
             {

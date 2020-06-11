@@ -13,6 +13,8 @@
 
 #include "SDL/SDL.h"
 #include "SDL/SDL_opengl.h"
+#include "httplib.h"
+
 #include "unet.hpp"
 #include "common.hpp"
 
@@ -29,6 +31,8 @@
 
 #define LOCAL_ADAPTER_IP_ADDRESS "fill.me.in" // ipconfig in cmd prompt on cheat machine, find local address, fill it in here
 #define MACHINE_PLAYING_GAME_IP_ADDRESS "fill.me.in" // the local IP address of the machine communicating with EFT servers
+#define HTTP_SERVER_ADDRESS MACHINE_PLAYING_GAME_IP_ADDRESS
+#define HTTP_SERVER_PORT 12345
 
 struct Packet
 {
@@ -65,6 +69,8 @@ void do_render(GraphicsState* state);
 
 GraphicsState make_gfx(SDL_GLContext ctx, SDL_Window* window);
 void resize_gfx(GraphicsState* state, int width, int height);
+
+std::unique_ptr<httplib::Server> make_server();
 
 int SDL_main(int argc, char* argv[])
 {
@@ -166,15 +172,17 @@ int SDL_main(int argc, char* argv[])
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
 
     SDL_GL_SetAttribute(SDL_GL_MULTISAMPLEBUFFERS, 1);
-    SDL_GL_SetAttribute(SDL_GL_MULTISAMPLESAMPLES, 8);
+    SDL_GL_SetAttribute(SDL_GL_MULTISAMPLESAMPLES, 4);
 
-    SDL_Window* win = SDL_CreateWindow("Bastian Suter's Queef II: UC Strikes Back", 100, 100, 1024, 768, SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
+    SDL_Window* win = SDL_CreateWindow("Bastian Suter's Queef III: encrypt me harder, daddy", 100, 100, 1024, 768, SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
     SDL_GLContext ctx = SDL_GL_CreateContext(win);
 
     glewInit();
     SDL_GL_SetSwapInterval(1);
 
     GraphicsState gfx = make_gfx(ctx, win);
+    std::unique_ptr<httplib::Server> server = make_server();
+    std::unique_ptr<std::thread> server_thread = std::make_unique<std::thread>([&]() { server->listen(HTTP_SERVER_ADDRESS, HTTP_SERVER_PORT); });
 
     bool quit = false;
 
@@ -223,8 +231,11 @@ int SDL_main(int argc, char* argv[])
     }
 
     net_thread->join();
-    gltTerminate();
 
+    server->stop();
+    server_thread->join();
+
+    gltTerminate();
     SDL_GL_DeleteContext(ctx);
     SDL_DestroyWindow(win);
 
@@ -289,7 +300,7 @@ void do_net(std::vector<Packet> work, const char* packet_dump_path)
                 std::lock_guard<std::mutex> lock(g_world_lock);
                 tk::g_state = std::make_unique<tk::GlobalState>();
                 tk::g_state->server_ip = packet.dst_ip.empty() ? "LOCAL_REPLAY" : packet.dst_ip;
-                tk::g_state->loot_db = std::make_unique<tk::LootDatabase>();
+                tk::g_loot_db = std::make_unique<tk::LootDatabase>();
             }
 
             write_packet(packet);
@@ -309,7 +320,6 @@ void do_net(std::vector<Packet> work, const char* packet_dump_path)
         }
 
         write_packet(packet);
-        // Now we strip the UNET-isms...
 
         UNET::NetPacketHeader* packet_hdr = reinterpret_cast<UNET::NetPacketHeader*>(data_start);
         decodeNetPacketHeader(packet_hdr);
@@ -317,7 +327,6 @@ void do_net(std::vector<Packet> work, const char* packet_dump_path)
         data_len -= sizeof(UNET::NetPacketHeader);
 
         UNET::PacketAcks128* acks = reinterpret_cast<UNET::PacketAcks128*>(data_start);
-        // probably need to decode??
         data_start += sizeof(UNET::PacketAcks128);
         data_len -= sizeof(UNET::PacketAcks128);
 
@@ -414,27 +423,115 @@ void do_net(std::vector<Packet> work, const char* packet_dump_path)
     }
 }
 
-bool get_loot_information(tk::LootEntry* entry, bool include_equipment, bool* draw_text, bool* draw_beam, float* beam_height, int* r, int* g, int* b)
+bool get_loot_information(const tk::LootInstance* instance, bool include_equipment, float* text_height, float* beam_height, int* r, int* g, int* b)
 {
-    // put your loot highlighting logic here
     bool draw = true;
-    *r = 0;
-    *g = 0;
-    *b = 0;
-    *draw_beam = false;
-    *draw_text = !entry->unknown;
+    float text_size = 0.02f;
+
+    if (tk::Category* category = tk::g_loot_db->get_category_for_template(instance->template_->template_id))
+    {
+        *r = category->r;
+        *g = category->g;
+        *b = category->b;
+        *beam_height = category->beam_height;
+    }
+    else if (instance->template_->bundle_path.find("/spec/key_card") != std::string::npos ||
+        instance->template_->bundle_path.find("/spec/item_keycard_lab") != std::string::npos ||
+        instance->template_->name.find("keycard") != std::string::npos)
+    {
+        *r = 255;
+        *g = 255;
+        *b = 255;
+        *beam_height = 50.0f;
+    }
+    else if (instance->template_->bundle_path.find("/spec/keys") != std::string::npos)
+    {
+        *r = 0;
+        *g = 255;
+        *b = 140;
+        *beam_height = instance->value >= 100000 ? 25.0f : 0.0f;
+    }
+    else if (include_equipment && instance->template_->bundle_path.find("/weapons/") != std::string::npos &&
+        instance->template_->bundle_path.find("usable_items") == std::string::npos)
+    {
+        *r = 255;
+        *g = 0;
+        *b = 0;
+        *beam_height = instance->value >= 50000 ? 25.0f : 0.0f;
+    }
+    else if (include_equipment && instance->template_->bundle_path.find("/items/equipment/") != std::string::npos)
+    {
+        *r = 0;
+        *g = 0;
+        *b = 255;
+        *beam_height = instance->value >= 100000 ? 25.0f : 0.0f;
+    }
+    else if (instance->template_->bundle_path.find("/usable_items/item_ifak/") != std::string::npos ||
+        instance->template_->bundle_path.find("/usable_items/item_meds_salewa/") != std::string::npos ||
+        instance->template_->bundle_path.find("/meds/item_meds_alusplint/") != std::string::npos ||
+        instance->template_->bundle_path.find("/usable_items/item_splint/") != std::string::npos ||
+        instance->template_->bundle_path.find("/usable_items/item_bandage/") != std::string::npos ||
+        instance->template_->bundle_path.find("/usable_items/item_golden_star_balm/") != std::string::npos ||
+        instance->template_->bundle_path.find("/usable_items/item_vaselin/") != std::string::npos ||
+        instance->template_->bundle_path.find("/usable_items/item_ibuprofen/") != std::string::npos ||
+        instance->template_->bundle_path.find("/usable_items/item_meds_grizly/") != std::string::npos ||
+        instance->template_->bundle_path.find("/usable_items/item_meds_core_medical_surgical_kit/") != std::string::npos ||
+        instance->template_->bundle_path.find("/usable_items/item_meds_survival_first_aid_rollup_kit/") != std::string::npos ||
+        instance->template_->bundle_path.find("/usable_items/item_blister/") != std::string::npos ||
+        instance->template_->bundle_path.find("/usable_items/item_syringe/") != std::string::npos)
+    {
+        *r = 0;
+        *g = 255;
+        *b = 0;
+        *beam_height = 0.0f;
+        text_size /= 1.5f;
+    }
+    else if (instance->template_->is_food)
+    {
+        *r = 153;
+        *g = 0;
+        *b = 153;
+        *beam_height = 0.0f;
+        text_size /= 1.5f;
+    }
+    else if (instance->value >= 50000)
+    {
+        *r = 255;
+        *g = 215;
+        *b = 0;
+        *beam_height = (instance->value / 400000.0f) * 25.0f;
+        text_size /= 1.5f;
+    }
+    else if (instance->value >= 5000)
+    {
+        *r = 192;
+        *g = 192;
+        *b = 192;
+        *beam_height = 0.0f;
+        text_size /= 2.0f;
+    }
+    else
+    {
+        draw = false;
+    }
+
+    // hidden
+    if (instance->value == 0)
+    {
+        draw = false;
+    }
 
     // highlight overrides all
-    if (entry->highlighted)
+    if (instance->highlighted)
     {
         draw = true;
-        *draw_beam = true;
-        *beam_height = 200.0f;
-        *draw_text = true;
         *r = 153;
         *g = 101;
         *b = 21;
+        *beam_height = 100.0f;
     }
+
+    *text_height = text_size;
 
     return draw;
 }
@@ -450,7 +547,7 @@ void do_render(GraphicsState* gfx)
 
         if (tk::g_state && tk::g_state->map)
         {
-            glm::mat4 projection = glm::perspective(glm::radians(75.0f), (float)gfx->width / (float)gfx->height, 0.1f, 2000.0f);
+            glm::mat4 projection = glm::perspective(glm::radians(75.0f), (float)gfx->width / (float)gfx->height, 0.1f, 100000.0f);
 
             // flip x axis, from right handed (gl) to left handed (unity)
             projection = glm::scale(projection, glm::vec3(-1.0f, 1.0f, 1.0f));
@@ -532,6 +629,30 @@ void do_render(GraphicsState* gfx)
                     glDrawArrays(GL_LINES, 0, 2);
                 };
 
+                { // Cardinal directions
+                    float min_x = tk::g_state->map->bounds_min().x;
+                    float max_x = tk::g_state->map->bounds_max().x;
+                    float min_z = tk::g_state->map->bounds_min().z;
+                    float max_z = tk::g_state->map->bounds_max().z;
+
+                    float width = max_x - min_x;
+                    float height = max_z - min_z;
+
+                    // Scale outwards to make the text further away in the distance
+                    min_x -= width * 5.0f;
+                    max_x += width * 5.0f;
+                    min_z -= height * 5.0f;
+                    max_z += height * 5.0f;
+
+                    float half_width = (max_x - min_x) / 2.0f;
+                    float half_height = (max_z - min_z) / 2.0f;
+
+                    draw_text(min_x + half_width, 500.0f, max_z, 15.0f, "N", 252, 212, 64, 64, &view, &projection);
+                    draw_text(max_x, 500.0f, min_z + half_height, 15.0f, "E", 252, 212, 64, 64, &view, &projection);
+                    draw_text(min_x + half_width, 500.0f, min_z, 15.0f, "S", 252, 212, 64, 64, &view, &projection);
+                    draw_text(min_x, 500.0f, min_z + half_height, 15.0f, "W", 252, 212, 64, 64, &view, &projection);
+                }
+
                 static std::unordered_map<std::string, std::tuple<uint8_t, uint8_t, uint8_t>> s_group_map; // maybe reset on map change?
 
                 for (tk::Observer* obs : tk::g_state->map->get_observers())
@@ -563,8 +684,8 @@ void do_render(GraphicsState* gfx)
                     {
                         if (obs->is_dead)
                         {
-                            scale_x = 2.0f;
-                            scale_y = 1.0f;
+                            scale_x = 1.0f;
+                            scale_y = 0.5f;
                         }
 
                         if (obs->type == tk::Observer::Scav && obs->is_npc)
@@ -594,15 +715,15 @@ void do_render(GraphicsState* gfx)
 
                     if (!obs->is_dead && !obs->is_unspawned)
                     {
-                        glm::vec3 at(obs->pos.x, obs->pos.y, obs->pos.z);
+                        glm::vec3 at(obs->pos.x, obs->pos.y + (scale_y / 2.0f), obs->pos.z);
                         glm::vec3 enemy_forward_vec = get_forward_vec(obs->rot.y, obs->rot.x, at);
-                        bool facing_towards_player = glm::dot(player_forward_vec, enemy_forward_vec) < -0.0f;
+                        bool facing_towards_player = glm::dot(player_forward_vec, enemy_forward_vec) < 0.0f;
                         int alpha = facing_towards_player ? 255 : 63;
                         glm::vec3 look = at + (enemy_forward_vec * (facing_towards_player ? 75.0f : 12.5f));
                         draw_line(at.x, at.y, at.z, look.x, look.y, look.z, r, g, b, alpha);
                     }
 
-                    draw_box(obs->pos.x, obs->pos.y, obs->pos.z, scale_x, scale_y, scale_z, r, g, b);
+                    draw_box(obs->pos.x, obs->pos.y + (scale_y / 2.0f), obs->pos.z, scale_x, scale_y, scale_z, r, g, b);
                 }
 
                 for (Vector3* pos : tk::g_state->map->get_static_corpses())
@@ -610,47 +731,96 @@ void do_render(GraphicsState* gfx)
                     draw_box(pos->x, pos->y, pos->z, 2.0f, 1.0f, 1.0f, 102, 0, 102);
                 }
 
-                std::vector<std::tuple<Vector3, std::string, int, int, int>> loot_text_to_render;
+                std::unordered_map<Vector3, std::vector<std::tuple<std::string, float, int, int, int, int>>> loot_text_to_render;
 
-                auto draw_loot = [&](tk::LootEntry* entry, bool include_equipment = true)
+                auto draw_loot = [&](tk::LootInstance* instance, bool include_equipment, float text_offset)
                 {
-                    bool draw_text, draw_beam;
+                    float text_height;
                     float beam_height;
                     int r, g, b;
-                    bool draw = get_loot_information(entry, include_equipment, &draw_text, &draw_beam, &beam_height, &r, &g, &b);
+                    bool draw = get_loot_information(instance, include_equipment, &text_height, &beam_height, &r, &g, &b);
 
                     if (draw)
                     {
                         glm::vec3 player_pos(player->pos.x, player->pos.y, player->pos.z);
-                        glm::vec3 entry_pos(entry->pos.x, entry->pos.y, entry->pos.z);
+                        glm::vec3 instance_pos(instance->pos.x, instance->pos.y, instance->pos.z);
 
-                        static constexpr float MIN_DISTANCE_FOR_LOOT = 10.0f;
-                        if (float distance = glm::length(entry_pos - player_pos); distance >= MIN_DISTANCE_FOR_LOOT)
+                        static constexpr float MIN_DISTANCE_FOR_LOOT = 2.5f;
+                        static constexpr float MAX_DISTANCE_FOR_LOOT_TEXT = 100.0f;
+
+                        if (float distance = glm::length(instance_pos - player_pos); distance >= MIN_DISTANCE_FOR_LOOT)
                         {
-                            if (draw_text)
+                            if (distance <= MAX_DISTANCE_FOR_LOOT_TEXT && text_height)
                             {
-                                loot_text_to_render.push_back(std::make_tuple(entry->pos, entry->name, r, g, b));
+                                std::string val(16, '\0');
+                                val.resize(std::snprintf(val.data(), val.size(), "%.1f", instance->value / 1000.0f));
+                                std::string name_and_val = instance->template_->name + " (" + val + "k)";
+                                Vector3 text_pos = instance->pos;
+                                text_pos.y += text_offset;
+                                loot_text_to_render[text_pos].emplace_back(std::make_tuple(std::move(name_and_val), text_height, r, g, b, instance->value));
                             }
 
-                            if (draw_beam)
+                            if (beam_height)
                             {
-                                draw_box(entry->pos.x, entry->pos.y + beam_height / 2.0f, entry->pos.z, 0.3f, beam_height, 0.3f, r, g, b);
+                                draw_box(instance->pos.x, instance->pos.y + beam_height / 2.0f, instance->pos.z, 0.3f, beam_height, 0.3f, r, g, b);
                             }
                         }
 
-                        draw_box(entry->pos.x, entry->pos.y, entry->pos.z, 0.3f, 0.3f, 0.3f, r, g, b);
+                        draw_box(instance->pos.x, instance->pos.y, instance->pos.z, 0.3f, 0.3f, 0.3f, r, g, b);
                     }
                 };
 
-                for (tk::LootEntry* entry : tk::g_state->map->get_loot())
+                std::unordered_map<int, int> value_cache;
+                std::vector<tk::LootInstance*> loot = tk::g_state->map->get_loot();
+
+                for (tk::LootInstance* instance : loot)
                 {
-                    draw_loot(entry);
+                    if (tk::is_loot_instance_inaccessible(instance))
+                    {
+                        continue;
+                    }
+
+                    int owner = tk::get_loot_instance_owner(instance);
+                    if (owner == tk::LootInstanceOwnerWorld)
+                    {
+                        draw_loot(instance, true, 0.5f);
+                    }
+                    else if (tk::Observer* obs = tk::g_state->map->get_observer(owner))
+                    {
+                        instance->pos = obs->pos;
+                        instance->pos.y += 1.0f;
+                        value_cache[owner] += instance->value;
+
+                        if (obs->type != tk::Observer::Self && !obs->is_unspawned)
+                        {
+                            draw_loot(instance, false, obs->is_dead ? 0.5f : 1.0f);
+                        }
+                    }
                 }
 
-                for (tk::TemporaryLoot* entry : tk::g_state->map->get_temporary_loots())
+                for (auto& [pos, texts] : loot_text_to_render)
                 {
-                    draw_box(entry->pos.x, entry->pos.y + 1.5f, entry->pos.z, 0.15f, 3.0f, 0.15f, 0, 200, 200);
-                    draw_box(entry->pos.x, entry->pos.y, entry->pos.z, 0.25f, 0.25f, 0.25f, 0, 200, 200);
+                    std::sort(std::begin(texts), std::end(texts),
+                        [&value_cache](
+                            const std::tuple<std::string, float, int, int, int, int>& lhs,
+                            const std::tuple<std::string, float, int, int, int, int>& rhs)
+                    {
+                        return std::get<5>(lhs) > std::get<5>(rhs);
+                    });
+
+                    static constexpr int MAX_NUMBER_STACKED_TEXTS = 5;
+
+                    int num_to_draw = std::min(MAX_NUMBER_STACKED_TEXTS, (int)texts.size());
+                    float offset = 0.0f;
+
+                    for (int i = num_to_draw - 1; i >= 0; --i) // most valuable at top
+                    {
+                        auto& [text, size, r, g, b, value] = texts[i];
+                        Vector3 new_pos = pos;
+                        new_pos.y += offset;
+                        offset += (size * 15.0f);
+                        draw_text(new_pos.x, new_pos.y, new_pos.z, size, text.c_str(), r, g, b, get_alpha_for_y(player_y, pos.y), &view, &projection);
+                    }
                 }
 
                 for (tk::Observer* obs : tk::g_state->map->get_observers())
@@ -674,31 +844,23 @@ void do_render(GraphicsState* gfx)
                     glm::vec3 player_pos(player->pos.x, player->pos.y, player->pos.z);
                     glm::vec3 obs_pos(obs->pos.x, obs->pos.y, obs->pos.z);
 
+                    float distance = glm::length(obs_pos - player_pos);
+
                     static constexpr float MIN_DISTANCE_FOR_DISTANCE = 30.0f;
-                    if (float distance = glm::length(obs_pos - player_pos); distance >= MIN_DISTANCE_FOR_DISTANCE)
+                    if (distance >= MIN_DISTANCE_FOR_DISTANCE && !obs->is_dead && !obs->is_unspawned)
                     {
-                        draw_text(obs->pos.x, obs->pos.y + 3.0f, obs->pos.z, 0.25f, std::to_string((int)distance).c_str(), r, g, b, get_alpha_for_y(player_y, obs->pos.y), &view, &projection);
+                        draw_text(obs->pos.x, obs->pos.y + 4.0f, obs->pos.z, 0.25f, std::to_string((int)distance).c_str(), r, g, b, get_alpha_for_y(player_y, obs->pos.y), &view, &projection);
                     }
 
-                    int total_val = 0;
-
-                    for (tk::LootEntry& entry : obs->inventory)
+                    static constexpr float MIN_DISTANCE_FOR_NAME = 10.0f;
+                    if (distance >= MIN_DISTANCE_FOR_NAME)
                     {
-                        entry.pos = obs->pos;
-                        entry.pos.y += 0.5f;
-                        draw_loot(&entry, false);
-                        total_val += entry.value;
+                        int total_val = value_cache[obs->cid];
+                        std::string val(16, '\0');
+                        val.resize(std::snprintf(val.data(), val.size(), "%.1f", total_val / 1000.0f));
+                        std::string name_and_val = obs->name + " (" + val + "k)";
+                        draw_text(obs->pos.x, obs->pos.y + 3.0f, obs->pos.z, 0.05f, name_and_val.c_str(), r, g, b, get_alpha_for_y(player_y, obs->pos.y), &view, &projection);
                     }
-
-                    std::string val(16, '\0');
-                    val.resize(std::snprintf(val.data(), val.size(), "%.1f", total_val / 1000.0f));
-                    std::string name_and_val = obs->name + " (" + val + "k)";
-                    draw_text(obs->pos.x, obs->pos.y + 2.0f, obs->pos.z, 0.05f, name_and_val.c_str(), r, g, b, get_alpha_for_y(player_y, obs->pos.y), &view, &projection);
-                }
-
-                for (auto& [pos, txt, r, g, b] : loot_text_to_render)
-                {
-                    draw_text(pos.x, pos.y + 0.5f, pos.z, 0.05f, txt.c_str(), r, g, b, get_alpha_for_y(player_y, pos.y), &view, &projection);
                 }
 
                 // TODO: Render
@@ -867,4 +1029,326 @@ void resize_gfx(GraphicsState* state, int width, int height)
     glViewport(0, 0, width, height);
     state->width = width;
     state->height = height;
+}
+
+std::unique_ptr<httplib::Server> make_server()
+{
+    std::unique_ptr<httplib::Server> server = std::make_unique<httplib::Server>();
+
+    server->Get("/loot",
+        [](const httplib::Request& req, httplib::Response& res)
+        {
+            std::string html;
+
+            html += R"(<!DOCTYPE HTML>)";
+            html += R"(<html>)";
+
+            html += R"(<head><meta http-equiv="refresh" content="10"></head>)";
+
+            tk::Category no_cat;
+            no_cat.name = "aaa_no_category";
+
+            std::vector<std::pair<tk::Category*, std::vector<tk::LootInstance*>>> loot;
+            std::unordered_map<tk::Category*, size_t> cat_lookup;
+            std::unordered_map<tk::LootInstance*, char> item_loc_lookup;
+
+            {
+                std::lock_guard<std::mutex> lock(g_world_lock);
+
+                if (tk::g_state && tk::g_state->map)
+                {
+                    for (tk::LootInstance* instance : tk::g_state->map->get_loot())
+                    {
+                        if (tk::is_loot_instance_inaccessible(instance))
+                        {
+                            continue;
+                        }
+
+                        int owner = tk::get_loot_instance_owner(instance);
+                        if (owner != tk::LootInstanceOwnerWorld)
+                        {
+                            tk::Observer* obs = tk::g_state->map->get_observer(owner);
+                            if (!obs || obs->type == tk::Observer::Self || obs->is_unspawned)
+                            {
+                                continue;
+                            }
+                        }
+
+                        item_loc_lookup[instance] = owner == tk::LootInstanceOwnerWorld ? 'W' : 'C';
+                        tk::Category* cat = tk::g_loot_db->get_category_for_template(instance->template_->template_id);
+
+                        if (!cat)
+                        {
+                            cat = &no_cat;
+                        }
+
+                        auto iter = cat_lookup.find(cat);
+                        if (iter == std::end(cat_lookup))
+                        {
+                            iter = cat_lookup.insert(std::make_pair(cat, loot.size())).first;
+                            loot.resize(loot.size() + 1);
+                            loot[iter->second].first = cat;
+                        }
+
+                        loot[iter->second].second.emplace_back(instance);
+                    }
+
+                    std::sort(std::begin(loot), std::end(loot),
+                        [](const auto& lhs, const auto& rhs)
+                    {
+                        return lhs.first->name > rhs.first->name;
+                    });
+
+                    for (auto& [cat, table] : loot)
+                    {
+                        std::sort(std::begin(table), std::end(table),
+                            [](const tk::LootInstance* lhs, const tk::LootInstance* rhs)
+                        {
+                            if (lhs->highlighted && !rhs->highlighted) return true;
+                            if (rhs->highlighted) return false;
+                            if (lhs->value_per_slot == rhs->value_per_slot) return lhs->id > rhs->id;
+                            return lhs->value_per_slot > rhs->value_per_slot;
+                        });
+
+                        html += cat->name;
+
+                        html += R"(<table>)";
+
+                        html += R"(<tr>)";
+                        html += R"(<th>hl</th>)";
+                        html += R"(<th>name</th>)";
+                        html += R"(<th>val</th>)";
+                        html += R"(<th>val_slot</th>)";
+                        html += R"(<th>loc</th>)";
+                        html += R"(</tr>)";
+
+                        for (tk::LootInstance* instance : table)
+                        {
+                            float text_height;
+                            float beam_height;
+                            int r = 64, g = 64, b = 64;
+                            get_loot_information(instance, true, &text_height, &beam_height, &r, &g, &b);
+
+                            html += R"(<tr style=")";
+
+                            int font_col = r < 64 && g < 64 && b < 64 ? 255 : 0;
+
+                            html += R"(color:rgb()";
+                            html += std::to_string(font_col);
+                            html += R"(,)";
+                            html += std::to_string(font_col);
+                            html += R"(,)";
+                            html += std::to_string(font_col);
+                            html += R"();)";
+
+                            html += R"(background-color:rgb()";
+                            html += std::to_string(r);
+                            html += R"(,)";
+                            html += std::to_string(g);
+                            html += R"(,)";
+                            html += std::to_string(b);
+                            html += R"();)";
+
+                            html += R"(">)";
+
+                            html += R"(<td>)";
+                            html += R"(<form action="/loot/)";
+                            html += instance->id;
+                            html += R"(" method="post"><button>X</button></form>)";
+                            html += R"(</td>)";
+
+                            html += R"(<td>)";
+
+                            static constexpr int MAX_NAME_LEN = 32;
+                            if (instance->template_->name.size() > MAX_NAME_LEN)
+                            {
+                                std::string temp = instance->template_->name;
+                                temp.resize(MAX_NAME_LEN);
+                                html += temp;
+                                html += "...";
+                            }
+                            else
+                            {
+                                html += instance->template_->name;
+                            }
+
+                            html += R"(</td>)";
+
+                            html += R"(<td>)";
+                            html += std::to_string(instance->value);
+                            html += R"(</td>)";
+
+                            html += R"(<td>)";
+                            html += std::to_string(instance->value_per_slot);
+                            html += R"(</td>)";
+
+                            html += R"(<td>)";
+                            html += item_loc_lookup[instance];
+                            html += R"(</td>)";
+
+                            html += R"(</tr>)";
+                        }
+
+                        html += R"(</table>)";
+                    }
+                }
+            }
+
+            html += R"(</html>)";
+            res.set_content(std::move(html), "text/html");
+        });
+
+    server->Get("/spy",
+        [](const httplib::Request& req, httplib::Response& res)
+        {
+            std::string html;
+
+            html += R"(<!DOCTYPE HTML>)";
+            html += R"(<html>)";
+
+            html += R"(<head><meta http-equiv="refresh" content="1"></head>)";
+
+            html += R"(<table>)";
+
+            html += R"(<tr>)";
+            html += R"(<th>name</th>)";
+            html += R"(<th>value</th>)";
+            html += R"(<th>distance</th>)";
+            html += R"(</tr>)";
+
+            {
+                std::lock_guard<std::mutex> lock(g_world_lock);
+
+                if (tk::g_state && tk::g_state->map)
+                {
+                    if (tk::Observer* player = tk::g_state->map->get_player())
+                    {
+                        std::unordered_map<const tk::Observer*, int> value_cache;
+
+                        for (tk::LootInstance* instance : tk::g_state->map->get_loot())
+                        {
+                            if (tk::is_loot_instance_inaccessible(instance))
+                            {
+                                continue;
+                            }
+
+                            if (tk::Observer* obs = tk::g_state->map->get_observer(tk::get_loot_instance_owner(instance)))
+                            {
+                                value_cache[obs] += instance->value;
+                            }
+                        }
+
+                        std::vector<tk::Observer*> observers = tk::g_state->map->get_observers();
+
+                        std::sort(std::begin(observers), std::end(observers),
+                            [&value_cache](const tk::Observer* lhs, const tk::Observer* rhs)
+                        {
+                            if (!lhs->is_unspawned && rhs->is_unspawned) return true;
+                            if (lhs->is_unspawned) return false;
+                            if (!lhs->is_dead && rhs->is_dead) return true;
+                            if (lhs->is_dead) return false;
+                            return value_cache[lhs] > value_cache[rhs];
+                        });
+
+                        for (tk::Observer* obs : observers)
+                        {
+                            html += R"(<tr style=")";
+
+                            uint8_t r = 0;
+                            uint8_t g = 0;
+                            uint8_t b = 0;
+
+                            if (obs->is_unspawned)
+                            {
+                                r = 179;
+                                g = 120;
+                                b = 211;
+                            }
+                            else
+                            {
+                                if (obs->type == tk::Observer::Scav && obs->is_npc)
+                                {
+                                    r = 255;
+                                    g = obs->is_dead ? 140 : 255;
+                                }
+                                else
+                                {
+                                    r = obs->is_dead ? 139 : 255;
+                                }
+                            }
+
+                            if (obs->type == tk::Observer::Self || (!obs->group_id.empty() && obs->group_id == player->group_id))
+                            {
+                                r = 0;
+                                g = 255;
+                                b = 0;
+                            }
+
+                            int font_col = r < 64 && g < 64 && b < 64 ? 255 : 0;
+
+                            html += R"(color:rgb()";
+                            html += std::to_string(font_col);
+                            html += R"(,)";
+                            html += std::to_string(font_col);
+                            html += R"(,)";
+                            html += std::to_string(font_col);
+                            html += R"();)";
+
+                            html += R"(background-color:rgb()";
+                            html += std::to_string(r);
+                            html += R"(,)";
+                            html += std::to_string(g);
+                            html += R"(,)";
+                            html += std::to_string(b);
+                            html += R"();)";
+
+                            html += R"(">)";
+
+                            html += R"(<td>)";
+                            html += obs->name;
+                            html += R"(</td>)";
+
+                            html += R"(<td>)";
+                            html += std::to_string(value_cache[obs]);
+                            html += R"(</td>)";
+
+                            glm::vec3 player_pos(player->pos.x, player->pos.y, player->pos.z);
+                            glm::vec3 obs_pos(obs->pos.x, obs->pos.y, obs->pos.z);
+
+                            html += R"(<td>)";
+                            html += std::to_string(glm::length(obs_pos - player_pos));
+                            html += R"(</td>)";
+
+                            html += R"(</tr>)";
+                        }
+                    }
+                }
+            }
+
+            html += R"(</table>)";
+            html += R"(</html>)";
+            res.set_content(std::move(html), "text/html");
+        });
+
+    server->Post(R"(/loot/(.*))",
+        [&](const httplib::Request& req, httplib::Response& res)
+        {
+            auto match = req.matches[1];
+
+            {
+                std::lock_guard<std::mutex> lock(g_world_lock);
+
+                if (tk::g_state && tk::g_state->map)
+                {
+                    if (tk::LootInstance* instance = tk::g_state->map->get_loot_instance_by_id(match.str()))
+                    {
+                        instance->highlighted = !instance->highlighted;
+                    }
+                }
+            }
+
+            res.set_redirect("/loot");
+        });
+
+    return server;
 }

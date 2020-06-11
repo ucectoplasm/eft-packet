@@ -66,8 +66,11 @@ namespace tk
 
     void process_server_init(ByteStream* stream)
     {
-		s_encrypted = stream->ReadBool(); // encrypt
-		stream->ReadBool(); // decrypt
+        s_encrypted = stream->ReadBool(); // encrypt
+        auto encrypted2 = stream->ReadBool(); // decrypt
+
+        printf("SESSION ENCRYPTION: %d %d\n", !!s_encrypted, !!encrypted2);
+
         auto realDateTime = stream->ReadBool() ? 0 : stream->ReadInt64();
         auto gameDateTime = stream->ReadInt64();
         auto timeFactor = stream->ReadSingle();
@@ -96,33 +99,73 @@ namespace tk
     void process_world_spawn(ByteStream* stream) { }
     void process_world_unspawn(ByteStream* stream) { }
 
-    void recursive_add_items(ItemDescriptor* desc, std::vector<LootEntry>* entries)
+    int csharp_get_hash_code(const char* str)
     {
-        LootItem* data = g_state->loot_db->query_loot(desc->template_id);
+        int hash1 = 5381;
+        int hash2 = hash1;
 
-        LootEntry entry;
-        entry.id = desc->id;
-        entry.name = data ? data->name : desc->template_id;
-        entry.value = data ? (data->value * desc->stack_count) : 0;
-        entry.value_per_slot = data ? (entry.value / (data->width * data->height)) : 0;
-        entry.rarity = data ? data->rarity : LootItem::Rarity::NotExist;
-        entry.bundle_path = data ? data->bundle_path : "";
-        entry.overriden = data ? data->overriden : false;
-        entry.unknown = data == nullptr;
-        entries->emplace_back(std::move(entry));
+        int c;
+        const char *s = str;
+        while ((c = s[0]) != 0)
+        {
+            hash1 = ((hash1 << 5) + hash1) ^ c;
+            c = s[1];
+            if (c == 0) break;
+            hash2 = ((hash2 << 5) + hash2) ^ c;
+            s += 2;
+        }
+        return hash1 + (hash2 * 1566083941);
+    }
+
+    LootInstance* recursive_add_items(ItemDescriptor* desc, std::vector<std::string>* entries, Vector3 pos, std::string& parent, int owner = LootInstanceOwnerInvalid, bool adding_to_player = false)
+    {
+        LootTemplate* template_ = g_loot_db->query_template(desc->template_id);
+
+        LootInstance instance;
+        instance.id = desc->id;
+        instance.parent_id = parent;
+        instance.csharp_hash = csharp_get_hash_code(desc->id.c_str());
+        instance.owner = owner;
+        instance.template_ = template_;
+        instance.pos = pos;
+        instance.stack_count = desc->stack_count;
+        instance.value = template_->value * instance.stack_count;
+        instance.value_per_slot = instance.value / (template_->width * template_->height);
+        entries->emplace_back(instance.id);
+
+        LootInstance* instance_ptr;
+
+        {
+            std::lock_guard<std::mutex> lock(g_world_lock);
+            instance_ptr = g_state->map->add_loot_instance(std::move(instance));
+        }
 
         for (const auto& grid : desc->grids)
         {
             for (const auto& item_in_grid : grid.items)
             {
-                recursive_add_items(item_in_grid.item.get(), entries);
+                recursive_add_items(item_in_grid.item.get(), entries, pos, desc->id);
             }
         }
 
-        for (const auto& attachment : desc->slots)
+        for (const auto& slot : desc->slots)
         {
-            recursive_add_items(attachment.contained_item.get(), entries);
+            LootInstance* added_slot = recursive_add_items(slot.contained_item.get(), entries, pos, desc->id);
+            if (slot.id == "SecuredContainer" || (adding_to_player && slot.id == "Scabbard"))
+            {
+                added_slot->inaccessible = true;
+            }
         }
+
+        for (const auto& stack_slot : desc->stack_slots)
+        {
+            for (const auto& item_in_stack_slot : stack_slot.items)
+            {
+                recursive_add_items(item_in_stack_slot.get(), entries, pos, desc->id);
+            }
+        }
+
+        return instance_ptr;
     }
 
     void process_subworld_spawn(ByteStream* stream)
@@ -144,27 +187,23 @@ namespace tk
             {
                 JsonLootItemDescriptor* desc = (JsonLootItemDescriptor*)morph.get();
 
-                std::vector<LootEntry> free_loot;
-                recursive_add_items(&desc->item, &free_loot);
-
-                std::lock_guard<std::mutex> lock(g_world_lock);
-
-                for (LootEntry& entry : free_loot)
-                {
-                    entry.pos = desc->position;
-                    g_state->map->add_loot_item(std::move(entry));
-                }
+                std::vector<std::string> free_loot;
+                recursive_add_items(&desc->item, &free_loot, desc->position, std::string(), LootInstanceOwnerWorld);
             }
             else if (morph->type == Polymorph::Type::JsonCorpseDescriptor)
             {
-                std::lock_guard<std::mutex> lock(g_world_lock);
                 JsonCorpseDescriptor* desc = (JsonCorpseDescriptor*)morph.get();
+
+                std::vector<std::string> corpse_loot;
+                recursive_add_items(&desc->item, &corpse_loot, desc->position, std::string(), LootInstanceOwnerWorld);
+
+                std::lock_guard<std::mutex> lock(g_world_lock);
                 g_state->map->add_static_corpse(desc->position);
             }
         }
     }
 
-    Observer deserialize_initial_state(ByteStream* stream)
+    Observer deserialize_initial_state(ByteStream* stream, int pid, int cid)
     {
         // now see async Task method_92(NetworkReader reader)
         auto unk2 = stream->ReadByte();
@@ -175,25 +214,18 @@ namespace tk
         auto pose_level = stream->ReadSingle();
 
         Observer obs;
+        obs.pid = pid;
+        obs.cid = cid;
 
-        {
+        ItemDescriptor equipment;
+
+        { // equipment
             auto inventory_data = stream->ReadBytesAndSize();
             CSharpByteStream cstream(inventory_data.data(), (int)inventory_data.size());
-
-            ItemDescriptor equipment;
             equipment.read(&cstream);
-
-            for (SlotDescriptor& slot : equipment.slots)
-            {
-                // TODO: Should add scabbard if this is a scav. Some NPCs can drop RRs.
-                if (slot.id != "Scabbard" && slot.id != "SecuredContainer")
-                {
-                    recursive_add_items(slot.contained_item.get(), &obs.inventory);
-                }
-            }
         }
 
-        {
+        { // profile
             auto profile_zip = stream->ReadBytesAndSize();
             auto profile_zip_data = decompress_zlib(profile_zip.data(), (int)profile_zip.size());
 
@@ -226,6 +258,9 @@ namespace tk
             obs.rot = to_euler(rot);
         }
 
+        std::vector<std::string> inventory_loot;
+        recursive_add_items(&equipment, &inventory_loot, obs.pos, std::string(), obs.cid, !obs.is_npc);
+
         {
             // can find out what gear is in their pockets (I think)
             // json
@@ -244,9 +279,7 @@ namespace tk
         auto cid = stream->ReadByte();
         auto pos = stream->ReadVector3();
 
-        Observer obs = deserialize_initial_state(stream);
-        obs.pid = pid;
-        obs.cid = cid;
+        Observer obs = deserialize_initial_state(stream, pid, cid);
         obs.type = Observer::Self;
 
         std::lock_guard<std::mutex> lock(g_world_lock);
@@ -261,9 +294,7 @@ namespace tk
         auto cid = stream->ReadByte();
         auto pos = stream->ReadVector3();
 
-        Observer obs = deserialize_initial_state(stream);
-        obs.pid = pid;
-        obs.cid = cid;
+        Observer obs = deserialize_initial_state(stream, pid, cid);
 
         std::lock_guard<std::mutex> lock(g_world_lock);
         g_state->map->create_observer(obs.cid, std::move(obs));
@@ -281,8 +312,6 @@ namespace tk
     void update_position(BitStream& bstream, tk::Observer* obs)
     {
         // static Vector3 smethod_3(IBitReaderStream reader, Vector3 prevPosition)
-        obs->last_pos = obs->pos;
-
         Vector3 new_pos = obs->pos;
 
         bool read = bstream.ReadBool();
@@ -313,6 +342,7 @@ namespace tk
             }
         }
 
+        TK_ASSERT(!isnan(new_pos.x) && !isnan(new_pos.y) && !isnan(new_pos.z));
         obs->pos = new_pos;
     }
 
@@ -345,24 +375,24 @@ namespace tk
             bstream.ReadLimitedInt32(0, 63);
         }
 
-        if (bstream.ReadBool())
+        if (bstream.ReadBool()) // MOVEMENT_DIRECTION_QUANTIZER
         {
             Vector2Quantizer quant(-1.0f, 1.0f, 0.03125f, -1.0f, 1.0f, 0.03125f);
             bstream.ReadQuantizedFloat(&quant._xFloatQuantizer);
             bstream.ReadQuantizedFloat(&quant._yFloatQuantizer);
         }
 
-        if (bstream.ReadBool())
+        if (bstream.ReadBool()) // PoseLevel, POSE_RANGE
         {
             bstream.ReadLimitedFloat(0.0f, 1.0f, 0.0078125f);
         }
 
-        if (bstream.ReadBool())
+        if (bstream.ReadBool()) // CharacterMovementSpeed
         {
             bstream.ReadLimitedFloat(0.0f, 1.0f, 0.0078125f);
         }
 
-        if (bstream.ReadBool())
+        if (bstream.ReadBool()) // Tilt, ILT_RANGE
         {
             bstream.ReadLimitedFloat(-5.0f, 5.0f, 0.0078125f);
         }
@@ -377,18 +407,18 @@ namespace tk
 
         bstream.ReadCheck();
 
-        bstream.ReadLimitedInt32(-1, 1);
-        bstream.ReadBool();
+        bstream.ReadLimitedInt32(-1, 1); // BlindFire
+        bstream.ReadBool(); // SoftSurface
 
-        if (!bstream.ReadBool())
+        if (!bstream.ReadBool()) // HeadRotation
         {
             bstream.ReadLimitedFloat(-50.0f, 50.0f, 0.0625f);
             bstream.ReadLimitedFloat(-50.0f, 50.0f, 0.0625f);
         }
 
-        bstream.ReadBool();
-        bstream.ReadBool();
-        bstream.ReadBool();
+        bstream.ReadBool(); // StaminaExhausted
+        bstream.ReadBool(); // OxygenExhausted
+        bstream.ReadBool(); // HandsExhausted
 
         bstream.ReadCheck();
 
@@ -438,7 +468,7 @@ namespace tk
 
         bstream.ReadCheck();
 
-        if (!bstream.ReadBool())
+        if (!bstream.ReadBool()) // handsChangePacket
         {
             int optype = bstream.ReadLimitedInt32(0, 10);
             bstream.ReadLimitedString(L' ', L'z');
@@ -468,11 +498,51 @@ namespace tk
                 if (polymorph->type == Polymorph::Type::InventoryMoveOperationDescriptor)
                 {
                     InventoryMoveOperationDescriptor* desc = (InventoryMoveOperationDescriptor*)polymorph.get();
-                    // TODO: Loot refactor
-                    // This should move the object around, not destroy it. Destroying it allows us to hide it in the short term.
-                    //if (desc->from->type == Polymorph::Type::InventoryOwnerItselfDescriptor)
+                    if (LootInstance* instance = g_state->map->get_loot_instance_by_id(desc->item_id))
                     {
-                        tk::g_state->map->destroy_loot_item_by_id(desc->item_id);
+                        auto get_container_id = [](Polymorph* morph) -> const std::string&
+                        {
+                            if (morph->type == Polymorph::Type::InventoryGridItemAddressDescriptor)
+                            {
+                                InventoryGridItemAddressDescriptor* desc = (InventoryGridItemAddressDescriptor*)morph;
+                                return desc->container.parent_id;
+                            }
+                            else if (morph->type == Polymorph::Type::InventoryOwnerItselfDescriptor)
+                            {
+                                InventoryOwnerItselfDescriptor* desc = (InventoryOwnerItselfDescriptor*)morph;
+                                return desc->container.parent_id;
+                            }
+                            else if (morph->type == Polymorph::Type::InventorySlotItemAddressDescriptor)
+                            {
+                                InventorySlotItemAddressDescriptor* desc = (InventorySlotItemAddressDescriptor*)morph;
+                                return desc->container.parent_id;
+                            }
+                            else if (morph->type == Polymorph::Type::InventoryStackSlotItemAddress)
+                            {
+                                InventoryStackSlotItemAddress* desc = (InventoryStackSlotItemAddress*)morph;
+                                return desc->container.parent_id;
+                            }
+
+                            TK_ASSERT(false);
+                            static std::string s_empty_str = "";
+                            return s_empty_str;
+                        };
+
+                        const std::string& from = get_container_id(desc->from.get());
+                        const std::string& to = get_container_id(desc->to.get());
+
+                        instance->parent_id = to;
+                        instance->owner = LootInstanceOwnerInvalid;
+                    }
+                }
+                else if (polymorph->type == Polymorph::Type::InventoryThrowOperationDescriptor)
+                {
+                    // Move from player to world
+                    InventoryThrowOperationDescriptor* desc = (InventoryThrowOperationDescriptor*)polymorph.get();
+                    if (LootInstance* instance = g_state->map->get_loot_instance_by_id(desc->item_id))
+                    {
+                        instance->parent_id = "";
+                        instance->owner = LootInstanceOwnerWorld;
                     }
                 }
             }
@@ -547,8 +617,8 @@ namespace tk
             }
             else
             {
-				bstream.ReadCheck(304); // DeserializeDiffUsing(IBitReaderStream reader, ref GStruct118 current, GStruct118 prevFrame)
-				bstream.ReadCheck(); // inside DeserializeDiffUsing(IBitReaderStream reader, ref GStruct90 movementInfoPacket, GStruct90 prevFrame, GStruct89 context)
+                bstream.ReadCheck(304); // DeserializeDiffUsing(IBitReaderStream reader, ref GStruct118 current, GStruct118 prevFrame)
+                bstream.ReadCheck(); // inside DeserializeDiffUsing(IBitReaderStream reader, ref GStruct90 movementInfoPacket, GStruct90 prevFrame, GStruct89 context)
 
                 update_position(bstream, obs);
                 update_rotation(bstream, obs);
@@ -587,16 +657,33 @@ namespace tk
             {
                 auto id = bstream.ReadInt32();
 
-                std::lock_guard<std::mutex> lock(g_world_lock);
-                TemporaryLoot* loot = g_state->map->get_or_create_temporary_loot(id);
+                LootInstance* instance = nullptr;
+
+                {
+                    std::lock_guard<std::mutex> lock(g_world_lock);
+                    for (LootInstance* loot : g_state->map->get_loot())
+                    {
+                        if (loot->csharp_hash == id)
+                        {
+                            instance = loot;
+                            break;
+                        }
+                    }
+                }
+
+                Vector3 pos;
+
+                if (instance)
+                {
+                    pos = instance->pos;
+                }
 
                 if (bstream.ReadBool())
                 {
                     Vector3Quantizer quant(-10.0f, 10.0f, 0.001953125f, -10.0f, 10.0f, 0.0009765625f, -10.0f, 10.0f, 0.001953125f, true);
-
-                    loot->pos.x += bstream.ReadQuantizedFloat(&quant._xFloatQuantizer);
-                    loot->pos.y += bstream.ReadQuantizedFloat(&quant._yFloatQuantizer);
-                    loot->pos.z += bstream.ReadQuantizedFloat(&quant._zFloatQuantizer);
+                    pos.x += bstream.ReadQuantizedFloat(&quant._xFloatQuantizer);
+                    pos.y += bstream.ReadQuantizedFloat(&quant._yFloatQuantizer);
+                    pos.z += bstream.ReadQuantizedFloat(&quant._zFloatQuantizer);
                 }
                 else
                 {
@@ -606,9 +693,14 @@ namespace tk
                         g_state->map->bounds_min().z, g_state->map->bounds_max().z, 0.001953125f,
                         true);
 
-                    loot->pos.x = bstream.ReadQuantizedFloat(&quant._xFloatQuantizer);
-                    loot->pos.y = bstream.ReadQuantizedFloat(&quant._yFloatQuantizer);
-                    loot->pos.z = bstream.ReadQuantizedFloat(&quant._zFloatQuantizer);
+                    pos.x = bstream.ReadQuantizedFloat(&quant._xFloatQuantizer);
+                    pos.y = bstream.ReadQuantizedFloat(&quant._yFloatQuantizer);
+                    pos.z = bstream.ReadQuantizedFloat(&quant._zFloatQuantizer);
+                }
+
+                if (instance)
+                {
+                    instance->pos = pos;
                 }
             }
         }

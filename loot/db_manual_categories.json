@@ -1,0 +1,111 @@
+{
+    "categories":
+    {
+        "v_quest_loot":
+        {
+            "r": 0,
+            "g": 0,
+            "b": 0,
+            "beam_height": 100.0
+        },
+        "w_ammo":
+        {
+            "r": 255,
+            "g": 204,
+            "b": 153,
+            "beam_height": 0.0
+        },
+        "x_valuables":
+        {
+            "r": 255,
+            "g": 105,
+            "b": 180,
+            "beam_height": 25.0
+        },
+        "y_ammo_high":
+        {
+            "r": 255,
+            "g": 204,
+            "b": 153,
+            "beam_height": 25.0
+        },
+        "yy_combat_stims":
+        {
+            "r": 0,
+            "b": 204,
+            "g": 204,
+            "beam_height": 25.0
+        },
+        "z_mindblowing":
+        {
+            "r": 115,
+            "g": 255,
+            "b": 0,
+            "beam_height": 100.0
+        }
+    },
+    "lewts":
+    {
+        "v_quest_loot":
+        [
+            "5d0379a886f77420407aa271", // shells
+            "5d03794386f77420415576f5", // mill battery
+            "5c052fb986f7746b2101e909", // rfid
+            "5c05300686f7746dce784e5d", // vpx
+            "5c052f6886f7746b1e3db148", // cofom
+            "5c05308086f7746b2101e90b", // virtex
+            "59e3639286f7741777737013" // rawr lion
+        ],
+        "w_ammo":
+        [
+            "56dff061d2720bb5668b4567", // bt
+            "56dff026d2720bb8668b4567" // bs
+        ],
+        "x_valuables":
+        [
+            "59faff1d86f7746c51718c9c", // bitcoin
+            "57347ca924597744596b4e71", // graphics card
+            "5c12620d86f7743f8b198b72", // tetriz
+            "590c621186f774138d11ea29", // flash drive
+            "590a373286f774287540368b", // dry fuel
+            "5c052e6986f7746b207bc3c9", // defibrilator
+            "5c12688486f77426843c7d32", // paracord
+            "5c12613b86f7743bbe2c3f76" // intelligence
+        ],
+        "y_ammo_high":
+        [
+            "57372c21245977670937c6c2", // 120 bt
+            "57372b832459776701014e41", // 120 bs
+            "59e690b686f7746c9f75e848", // m995
+            "59e6906286f7746c9f75e847" // m856a1
+        ],
+        "yy_combat_stims":
+        [
+            "5c0e531286f7747fa54205c2", // sj1
+            "5c0e534186f7747fa1419867", // etg
+            "5c0e531d86f7747fa23f4d42", // sj6
+            "5c0e530286f7747fa1419862", // propital
+            "5c10c8fd86f7743d7d706df3" // adrenaline
+        ],
+        "z_mindblowing":
+        [
+            "5c0530ee86f774697952d952", // ledx
+            "5c110624d174af029e69734c", // thermal goggles
+            "5c0126f40db834002a125382", // red rebel
+            "5b7c710788a4506dec015957", // junkbox
+            "5c0a840b86f7742ffa4f2482", // thicc item case
+            "59fb042886f7746c5005a7b2", // items case
+            "5b6d9ce188a4501afc1b2b25", // thicc weapon case
+            "59fb023c86f7746d0d4b423c", // weapon case
+            "5aafbcd986f7745e590fff23", // meds case
+            "5e2af55f86f7746d4159f07c", // grenade case
+            "5c093db286f7740a1b2617e3", // food case
+            "5c127c4486f7745625356c13", // magazine case
+            "5aafbde786f774389d0cbc0f", // ammo case
+            "59fb016586f7746d0d4b423a", // money case
+            "5d235bb686f77443f4331278", // sicc case
+            "59fafd4b86f7745ca07e1232", // keytool
+            "5c093e3486f77430cb02e593" // dogtag case
+        ]
+    }
+}

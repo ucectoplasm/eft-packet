@@ -27,6 +27,11 @@ namespace tk
 
                 std::string err;
                 json = json11::Json::parse(data.data(), err, json11::COMMENTS);
+
+                if (!err.empty())
+                {
+                    printf("Error: %s in file %s\n", err.c_str(), path);
+                }
             }
 
             return json;
@@ -37,93 +42,98 @@ namespace tk
 
             for (auto& data_entry : templates.object_items())
             {
-                LootItem item;
-                item.id = data_entry.first;
-
-                auto props = data_entry.second["_props"];
-
+                LootTemplate item;
+                item.template_id = data_entry.first;
+                auto& props = data_entry.second["_props"];
                 item.name = props["Name"].string_value();
                 item.value = props["CreditsPrice"].int_value();
-                item.lootable = !props["Unlootable"].bool_value();
                 item.bundle_path = props["Prefab"]["path"].string_value();
                 item.width = props["Width"].int_value();
                 item.height = props["Height"].int_value();
-
-                item.rarity = LootItem::Common;
-
-                if (props["Rarity"] == "Rare")
-                {
-                    item.rarity = LootItem::Rare;
-                }
-                else if (props["Rarity"] == "Superrare")
-                {
-                    item.rarity = LootItem::SuperRare;
-                }
-                else if (props["Rarity"] == "Not_exist")
-                {
-                    item.rarity = LootItem::NotExist;
-                }
-
-                item.overriden = false;
-
-                m_db[item.id] = std::move(item);
+                item.is_food = !props["foodUseTime"].is_null();
+                m_templates[item.template_id] = std::move(item);
             }
         }
 
-        { // Second pass - correct name with localization.
-            auto locale = load_file_as_json("db_locale.json");
-            for (auto& data_entry : locale["templates"].object_items())
+        { // Second pass - correct name and prices with Tarkov market API.
+            auto items = load_file_as_json("db_market_items.json");
+            for (auto& item : items.array_items())
             {
-                auto iter = m_db.find(data_entry.first);
-                if (iter != std::end(m_db))
+                auto iter = m_templates.find(item["bsgId"].string_value());
+                if (iter != std::end(m_templates))
                 {
-                    iter->second.name = data_entry.second["Name"].string_value();
-                }
-            }
-
-        }
-
-        { // Third pass - correct price.
-            auto prices = load_file_as_json("db_prices.json");
-            for (auto& data_array_entry : prices.array_items())
-            {
-                auto iter = m_db.find(data_array_entry["template"].string_value());
-                if (iter != std::end(m_db))
-                {
-                    iter->second.value = data_array_entry["price"].int_value();
+                    iter->second.name = item["name"].string_value();
+                    iter->second.value = item["avg7daysPrice"].int_value();
                 }
             }
         }
 
         { // Fourth pass - manual prices
-            auto prices = load_file_as_json("db_manualprices.json");
+            auto prices = load_file_as_json("db_manual_prices.json");
             for (auto data_entry : prices.object_items())
             {
-                auto iter = m_db.find(data_entry.first);
-                if (iter != std::end(m_db))
+                auto iter = m_templates.find(data_entry.first);
+                if (iter != std::end(m_templates))
                 {
                     iter->second.value = data_entry.second.int_value();
                 }
             }
         }
 
-        { // Fifth pass - manual override
-            auto overrides = load_file_as_json("db_questlewts.json");
-            for (auto data_entry : overrides["questlewts"].array_items())
+        { // Fifth pass - manual categories
+            auto overrides = load_file_as_json("db_manual_categories.json");
+
+            std::unordered_map<std::string, size_t> cat_lookup;
+
+            // categories
+            for (auto& entry : overrides["categories"].object_items())
             {
-                auto iter = m_db.find(data_entry.string_value());
-                if (iter != std::end(m_db))
+                Category cat;
+                cat.name = entry.first;
+                cat.r = entry.second["r"].int_value();
+                cat.g = entry.second["g"].int_value();
+                cat.b = entry.second["b"].int_value();
+                cat.beam_height = (float)entry.second["beam_height"].number_value();
+                cat_lookup[cat.name] = m_categories.size();
+
+                m_categories.emplace_back(std::move(cat));
+            }
+
+            // entries
+            for (auto& entry : overrides["lewts"].object_items())
+            {
+                auto iter = cat_lookup.find(entry.first);
+
+                if (iter == std::end(cat_lookup))
                 {
-                    iter->second.overriden = true;
+                    continue;
+                }
+
+                for (auto& item : entry.second.array_items())
+                {
+                    m_items_to_categories[item.string_value()] = iter->second;
                 }
             }
         }
     }
 
-    LootItem* LootDatabase::query_loot(const std::string& id)
+    LootTemplate* LootDatabase::query_template(const std::string& template_id)
     {
-        auto entry = m_db.find(id);
-        return entry == std::end(m_db) ? nullptr : &entry->second;
+        auto entry = m_templates.find(template_id);
+        if (entry == std::end(m_templates))
+        {
+            LootTemplate unknown_template;
+            unknown_template.template_id = template_id;
+            unknown_template.name = template_id;
+            entry = m_templates.insert(std::make_pair(template_id, std::move(unknown_template))).first;
+        }
+        return &entry->second;
+    }
+
+    Category* LootDatabase::get_category_for_template(const std::string& template_id)
+    {
+        auto iter = m_items_to_categories.find(template_id);
+        return iter == std::end(m_items_to_categories) ? nullptr : &m_categories[iter->second];
     }
 
     std::vector<std::unique_ptr<Polymorph>> read_polymorphs(uint8_t* data, int size)
@@ -253,14 +263,14 @@ namespace tk
     void SightComponentDescriptor::read(CSharpByteStream* stream)
     {
         sight_mode = stream->ReadInt32();
-        
+
         int num = stream->ReadInt32();
         for(int i = 0; i < num; i++)
         {
             // Dumping these values for now
             auto dump = stream->ReadInt32();
         }
- 
+
         int num2 = stream->ReadInt32();
         for (int i = 0; i < num2; i++)
         {
