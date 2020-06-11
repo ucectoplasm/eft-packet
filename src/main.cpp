@@ -33,7 +33,7 @@
 #define MACHINE_PLAYING_GAME_IP_ADDRESS "fill.me.in" // the local IP address of the machine communicating with EFT servers
 
 //#define HTTP_SERVER_ENABLE // uncomment to turn on embedded http server - note this is a detection vector
-#define HTTP_SERVER_ADDRESS MACHINE_PLAYING_GAME_IP_ADDRESS
+#define HTTP_SERVER_ADDRESS "localhost"
 #define HTTP_SERVER_PORT 12345
 
 struct Packet
