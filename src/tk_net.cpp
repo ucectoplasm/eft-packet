@@ -671,7 +671,7 @@ namespace tk
                     }
                 }
 
-                Vector3 pos;
+                Vector3 pos{};
 
                 if (instance)
                 {

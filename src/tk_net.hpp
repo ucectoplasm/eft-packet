@@ -313,9 +313,9 @@ namespace tk
 
         void ReadCheck(uint32_t num = 0)
         {
-            m_buffer.ReadAlign();
-            uint32_t check = m_buffer.ReadBits(32);
-			TK_ASSERT(!num || check == num);
+            //m_buffer.ReadAlign();
+            //uint32_t check = m_buffer.ReadBits(32);
+			//TK_ASSERT(!num || check == num);
         }
 
         std::wstring ReadString(uint32_t max_size = 0)
